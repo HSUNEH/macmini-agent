@@ -32,6 +32,7 @@ LLM은 Discord 토큰을 모릅니다. 보낼 내용을 파일로 쓰면 스크�
 | 카드뉴스 | `cards: true`인 작업은 LLM이 내용만 쓰고, 템플릿이 1080×1350 PNG로 그려 Discord에 올림 (헤드리스 Chrome). 한글·숫자가 깨지지 않음 |
 | 대화 봇 | 채널에 쓰면 스레드가 열리고 스레드마다 CLI 세션 하나. 작업 중 `!stop`, 모델 전환 `!claude`/`!codex`(대화 유지) |
 | 프로젝트 개발 | 대화가 등록된 프로젝트 개발이면 모델이 `[프로젝트] 스레드에서 이어가기` 버튼을 달고, 누르면 그 레포 폴더에서 새 세션이 시작됨 |
+| Orca 연동 (`backend: orca`) | Claude 대화가 맥의 [Orca](https://github.com/stablyai/orca) 안의 실제 탭으로 열림. 메인 스레드는 메인 워크스페이스 탭, 프로젝트 스레드는 그 레포 탭. Discord에서 하던 대화를 Orca에서 바로 보고 이어 쓸 수 있음 |
 | 터미널과 세션 공유 | `!status`가 알려주는 `cd <폴더> && claude --resume <id>`로 맥에서 이어서 작업, 반대로 `!resume <id>` |
 | 모델 교체 | `bin/engines.py`에 CLI 하나당 build/parse/progress 함수만 쓰면 새 모델 추가 |
 | (선택) YouTube | 지정한 채널의 새 영상 자막을 받아 요약. 새 영상 없으면 LLM 호출 안 함 |
@@ -52,7 +53,7 @@ LLM은 Discord 토큰을 모릅니다. 보낼 내용을 파일로 쓰면 스크�
 
 ```bash
 git clone https://github.com/HSUNEH/macmini-agent.git && cd macmini-agent
-mkdir -p local && cp -R examples/jobs examples/chat examples/kakao local/
+mkdir -p local && cp -R examples/jobs examples/chat examples/kakao examples/main local/
 cp examples/config.example.json local/config.json
 ```
 
@@ -82,6 +83,21 @@ ssh macmini '~/macmini_agent/bin/run_job.py ai-news --dry-run'   # Discord로 �
 ```
 
 > SSH 세션에서는 macOS 키체인이 잠겨 있어서 `claude`가 로그아웃으로 보일 수 있습니다. launchd로 도는 봇과 예약 작업은 GUI 세션이라 상관없습니다. SSH에서도 쓰려면 `claude setup-token`으로 받은 토큰을 `set_secret.sh CLAUDE_CODE_OAUTH_TOKEN`으로 넣으세요.
+
+## Orca 연동 (선택)
+
+맥에 Orca가 켜져 있으면 `local/config.json`의 `chat.backend`를 `"orca"`로 바꾸세요. `chat.workdir`(예: `~/assistant`)가 메인 워크스페이스가 됩니다.
+
+```
+Discord 메인 채널에 글   → 새 스레드  ⇄  Orca [assistant › main] 새 Claude 탭  (메인 = 전체 관장, memory/ 에 장기기억)
+대화 중 프로젝트 감지    → "redbox 프로젝트로 감지됐어요! 새 세션으로 이어갈까요?" [이어가기]
+                           → 새 스레드 ⇄  Orca [redbox › main] 새 Claude 탭     (그 레포의 CLAUDE.md·스킬)
+```
+
+- 탭은 `claude --dangerously-skip-permissions --session-id <id>`로 열리고, 봇은 Orca CLI로 메시지를 입력한 뒤 세션 기록 파일을 읽어 진행 상황과 답을 Discord로 보냅니다.
+- 탭을 닫거나 Orca가 재시작돼도 다음 메시지에서 `--resume`으로 같은 세션을 다시 엽니다. Orca에서 직접 이어 쓴 내용도 같은 세션에 남습니다.
+- `./deploy.sh`가 메인 폴더(`git init` 포함)와 프로젝트를 Orca 워크스페이스로 등록하고, Claude의 폴더 신뢰 확인을 미리 처리합니다. 메인 폴더의 `CLAUDE.md`는 `local/main/CLAUDE.md`(예시: `examples/main/`)로 관리합니다.
+- 지금은 Claude만 Orca 탭으로 돕니다. `!codex`는 백그라운드 `codex exec`로 실행됩니다.
 
 ## 작업 파일 형식
 
@@ -129,6 +145,7 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 bin/run_job.py        예약 작업 실행기
 bin/chat_bot.py       Discord 대화 봇 (launchd 상주, discord.py)
 bin/engines.py        CLI 정의: codex, claude
+bin/orca_session.py   Orca 탭에서 claude 세션 운영 (backend: orca)
 bin/cards.py          카드뉴스 렌더러
 bin/discord_api.py    Discord REST (전송, 첨부, 반응, ✅ 승인 조회)
 bin/install.py        launchd 등록 (맥에서 실행됨)

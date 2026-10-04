@@ -21,18 +21,34 @@
   },
   "youtube": {
     "channels": [
-      {"name": "AI Engineer", "url": "https://www.youtube.com/@aidotengineer"},
-      {"name": "Lenny's Podcast", "url": "https://www.youtube.com/@LennysPodcast"}
+      {
+        "name": "AI Engineer",
+        "url": "https://www.youtube.com/@aidotengineer"
+      },
+      {
+        "name": "Lenny's Podcast",
+        "url": "https://www.youtube.com/@LennysPodcast"
+      }
     ]
   },
   "chat": {
     "channel": "DISCORD_CHANNEL_ID",
-    "users": ["YOUR_DISCORD_USER_ID"],
+    "users": [
+      "YOUR_DISCORD_USER_ID"
+    ],
+    "backend": "cli",
     "default_engine": "codex",
     "workdir": "~",
     "timeout": 3600,
     "projects": {
-      "my-app": {"workdir": "~/code/my-app", "engine": "claude", "aliases": ["myapp", "앱"]}
+      "my-app": {
+        "workdir": "~/code/my-app",
+        "engine": "claude",
+        "aliases": [
+          "myapp",
+          "앱"
+        ]
+      }
     }
   }
 }

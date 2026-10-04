@@ -40,6 +40,7 @@ import discord
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "bin"))
 import engines  # noqa: E402
+import orca_session  # noqa: E402
 from discord_api import load_env, split_text  # noqa: E402
 
 HOME = Path.home() / ".macmini-agent"
@@ -59,6 +60,8 @@ HANDOFF = re.compile(r"^[ \t`]*<<project:([\w-]+)>>[ \t]*(.*?)[ \t`]*$", re.M)
 CARRY_TURNS, CARRY_CHARS = 12, 1500  # recent turns kept per thread for engine switches, chars per message
 STATUS_EVERY = 3.0  # seconds between status-message edits
 HOME_DIR = os.path.expanduser(CHAT.get("workdir", "~"))
+# "orca": Claude conversations run in visible Orca tabs (see orca_session.py); anything else: headless CLI.
+USE_ORCA = CHAT.get("backend") == "orca"
 HELP = ("프로젝트 개발 얘기면 그 프로젝트 스레드로 옮길지 버튼으로 물어봅니다: " + ", ".join(PROJECTS) + "\n"
         "`!<프로젝트>` 이 스레드를 그 프로젝트로 · `!home` 일반 대화로 · `!claude` / `!codex` 모델 변경\n"
         "`!new` 새 세션 · `!resume <세션ID>` Orca 등에서 하던 세션 이어받기 · `!stop` 중단 · `!status` 상태\n"
@@ -123,13 +126,27 @@ class HandoffView(discord.ui.View):
 
     def __init__(self, name: str):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label=f"{name} 스레드에서 이어가기", style=discord.ButtonStyle.primary,
+        self.add_item(discord.ui.Button(label=f"{name} 새 세션으로 이어가기", style=discord.ButtonStyle.primary,
                                         custom_id=f"handoff:{name}"))
 
 
 def reset_session(conv: dict) -> None:
     """Forget the conversation: no engine sessions, empty log."""
     conv.update(sessions={}, seen={}, log=[], turns=0)
+
+
+async def close_tab(conv: dict) -> None:
+    """Close the thread's Orca tab (if any) before the thread starts over or moves folders."""
+    handle = (conv.pop("orca", None) or {}).get("handle")
+    if handle:
+        try:
+            await orca_session.orca("terminal", "close", "--terminal", handle, timeout=30)
+        except orca_session.OrcaError:
+            pass
+
+
+def uses_orca(conv: dict) -> bool:
+    return USE_ORCA and conv.get("engine") == "claude"
 
 
 def clip(text: str) -> str:
@@ -308,6 +325,7 @@ async def on_message(msg: discord.Message) -> None:
         cmd, rest = m.group(1).lower(), m.group(2).strip()
         reply = None
         if cmd in PROJECTS or cmd == "home":
+            await close_tab(conv)
             set_project(conv, None if cmd == "home" else cmd)
             reply = f"`{conv['project'] or '일반'}` (`{conv['workdir']}`)에서 `{conv['engine']}`로 새 세션을 시작합니다."
         elif cmd in engines.ENGINES:
@@ -315,16 +333,23 @@ async def on_message(msg: discord.Message) -> None:
             how = "전에 쓰던 세션에 그 사이 대화를 넘겨" if conv.get("sessions", {}).get(cmd) else "새 세션에 지금까지 대화를 넘겨"
             reply = f"이제 `{cmd}`로 이어갑니다 ({how}줍니다, 폴더 `{conv['workdir']}`)."
         elif cmd == "new":
+            await close_tab(conv)
             reset_session(conv)
             reply = f"`{conv['engine']}` 새 세션으로 시작합니다 (이전 대화는 넘기지 않습니다)."
         elif cmd == "resume" and rest:
             sid, rest = rest.split()[0], ""
             conv.setdefault("sessions", {})[conv["engine"]] = sid
+            if uses_orca(conv):  # the next message reopens this session in an Orca tab
+                await close_tab(conv)
+                conv["orca"] = {"workdir": conv["workdir"], "session": sid}
             conv.setdefault("seen", {})[conv["engine"]] = conv.get("turns", 0)
             reply = f"`{conv['engine']}` 세션 `{sid}`을 이어갑니다. 다른 모델 세션이면 먼저 `!claude`/`!codex`로 바꾸세요."
         elif cmd == "stop":
             proc = running.get(key)
-            if proc and proc.returncode is None:
+            if isinstance(proc, tuple):  # ("orca", handle): interrupt the tab's turn
+                await orca_session.interrupt(proc[1])
+                await target.send("중단했습니다. 같은 세션에서 이어서 말하면 됩니다.")
+            elif proc and proc.returncode is None:
                 os.killpg(proc.pid, signal.SIGTERM)
             else:
                 await target.send("실행 중인 작업이 없습니다.")
@@ -333,6 +358,8 @@ async def on_message(msg: discord.Message) -> None:
             sid = conv.get("sessions", {}).get(conv["engine"])
             hint = f"\n터미널에서 이어가기: `cd {conv['workdir']} && {engines.ENGINES[conv['engine']].resume_hint(sid)}`" if sid else ""
             busy = " · 작업 중" if key in running else ""
+            if uses_orca(conv) and conv.get("orca", {}).get("handle"):
+                busy += " · Orca 탭에서 진행 (같은 대화를 Orca에서 바로 이어 쓸 수 있음)"
             await target.send(f"`{conv['project'] or '일반'}` · 모델 `{conv['engine']}` · 폴더 `{conv['workdir']}` · 세션 `{sid or '없음'}`{busy}{hint}")
             return
         elif cmd == "restart":
@@ -379,13 +406,22 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
         engine = conv["engine"]
         sid = conv.setdefault("sessions", {}).get(engine)
         full = carryover(conv, engine) + prompt
-        if not sid:
-            full = f"{first_prompt(conv)}\n\n---\n\n{full}"
         status = Status(target, engine)
         try:
             async with target.typing():
-                reply_text, session = await run_engine(key, engine, sid, conv["workdir"], full, status)
-        except engines.EngineError as exc:
+                if uses_orca(conv):
+                    title = (getattr(target, "name", None) or "discord")[:60]
+                    try:
+                        reply_text, session = await orca_session.run(
+                            conv, title, full, first_prompt(conv), status.add,
+                            lambda handle: running.__setitem__(key, ("orca", handle)))
+                    finally:
+                        running.pop(key, None)
+                else:
+                    if not sid:
+                        full = f"{first_prompt(conv)}\n\n---\n\n{full}"
+                    reply_text, session = await run_engine(key, engine, sid, conv["workdir"], full, status)
+        except (engines.EngineError, orca_session.OrcaError) as exc:
             await status.finish(False)
             hint = " 세션이 꼬였으면 `!new`로 새로 시작하세요." if sid and "!stop" not in str(exc) else ""
             await target.send(f"⚠️ {str(exc)[:1500]}{hint}")
@@ -406,7 +442,7 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
         for chunk in split_text(reply_text) or ["(빈 응답)"]:
             await target.send(chunk, allowed_mentions=discord.AllowedMentions.none())
         if handoff:
-            await target.send(f"➡️ `{handoff[0]}` 스레드에서 이어갈까요?\n> {handoff[1][:300]}",
+            await target.send(f"🔎 `{handoff[0]}` 프로젝트로 감지됐어요! 새 세션으로 이어서 작업할까요?\n> {handoff[1][:300]}",
                               view=HandoffView(handoff[0]), allowed_mentions=discord.AllowedMentions.none())
 
 

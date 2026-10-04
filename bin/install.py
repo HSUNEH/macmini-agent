@@ -3,6 +3,7 @@
 
 - ~/.macmini-agent/venv with requirements.txt (for the chat bot)
 - local/skills/<name> symlinked into ~/.claude/skills and ~/.codex/skills
+- chat.backend "orca": main workspace + projects registered in Orca and trusted by Claude Code
 - local/jobs/<job>.md with a `schedule` -> com.macmini-agent.<job> (calendar job)
 - com.macmini-agent.chat -> bin/chat_bot.py (always running)
 - local/launchd/*.plist (standalone services) are copied as-is
@@ -11,6 +12,8 @@ A plist is reloaded only when its content changed (pass --restart to reload the 
 """
 from __future__ import annotations
 
+import json
+import os
 import plistlib
 import subprocess
 import sys
@@ -52,6 +55,45 @@ def link_skills() -> None:
                 dest.unlink()
             dest.symlink_to(skills / name)
             print(f"skill {name}: linked into {skills_dir}")
+
+
+def ensure_orca() -> None:
+    """chat.backend "orca": the main workspace folder and every project are Orca workspaces that
+    Claude Code already trusts, so a tab opened from Discord starts without a dialog."""
+    chat = json.loads((ROOT / "local" / "config.json").read_text(encoding="utf-8")).get("chat", {})
+    if chat.get("backend") != "orca":
+        return
+    main = Path(os.path.expanduser(chat.get("workdir", "~")))
+    (main / "memory").mkdir(parents=True, exist_ok=True)
+    src, dest = ROOT / "local" / "main" / "CLAUDE.md", main / "CLAUDE.md"
+    if src.exists() and (dest.is_symlink() or not dest.exists()):
+        if dest.is_symlink():
+            dest.unlink()
+        dest.symlink_to(src)
+    if not (main / ".git").exists():  # Orca only takes git repos; history of memory/ is a bonus
+        subprocess.run(["git", "init", "-q", "-b", "main", str(main)], check=True)
+        subprocess.run(["git", "-C", str(main), "commit", "-q", "--allow-empty", "-m", "main workspace"], check=True)
+    dirs = [str(main)] + [os.path.expanduser(p["workdir"]) for p in chat.get("projects", {}).values()]
+
+    orca = "/Applications/Orca.app/Contents/Resources/bin/orca"
+    listed = subprocess.run([orca, "repo", "list", "--json"], capture_output=True, text=True)
+    known = {r.get("path") for r in json.loads(listed.stdout or "{}").get("result", {}).get("repos", [])}
+    for d in dirs:
+        if d not in known:
+            r = subprocess.run([orca, "repo", "add", "--path", d, "--json"], capture_output=True, text=True)
+            print(f"orca workspace {d}: {'added' if r.returncode == 0 else 'FAILED ' + r.stdout[-200:]}")
+
+    cfg = Path.home() / ".claude.json"
+    data = json.loads(cfg.read_text(encoding="utf-8")) if cfg.exists() else {}
+    projects = data.setdefault("projects", {})
+    missing = [d for d in dirs if not projects.get(d, {}).get("hasTrustDialogAccepted")]
+    if missing:
+        for d in missing:
+            projects.setdefault(d, {})["hasTrustDialogAccepted"] = True
+        tmp = cfg.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        tmp.replace(cfg)
+        print(f"claude trust: {', '.join(missing)}")
 
 
 def job_plist(job: str, schedule: list) -> bytes:
@@ -99,6 +141,7 @@ def main() -> int:
     LOGS.mkdir(parents=True, exist_ok=True)
     ensure_venv()
     link_skills()
+    ensure_orca()
     wanted = set()
     for md in sorted((ROOT / "local" / "jobs").glob("*.md")):
         meta, _ = parse_job(md.stem)
