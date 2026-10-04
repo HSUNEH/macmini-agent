@@ -1,0 +1,5 @@
+__pycache__/
+.DS_Store
+.env
+# personal config, jobs, prompts, skills: copy examples/ here
+local/

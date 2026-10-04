@@ -1,0 +1,13 @@
+# KakaoTalk rooms to collect (optional feature). chat_id comes from `agent-kakaotalk chat list`;
+# open-chat titles are sometimes missing there, so rooms are matched by chat_id.
+rooms:
+  - name: "AI 오픈채팅방 예시"
+    chat_id: "1234567890123456"
+    category: "ai"
+
+collection:
+  # agent-kakaotalk has no time-range option, so fetch generously and filter by sent_at.
+  messages_per_room: 1800
+  timezone: "Asia/Seoul"
+  summary_window_start_hour: 7
+  summary_window_end_hour: 7

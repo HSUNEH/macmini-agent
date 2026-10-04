@@ -1,0 +1,38 @@
+{
+  "channels": {
+    "news": "DISCORD_THREAD_ID_FOR_NEWS",
+    "digest": "DISCORD_THREAD_ID_FOR_SUMMARIES_AND_ALERTS",
+    "candidates": "DISCORD_THREAD_ID_FOR_APPROVAL_CANDIDATES"
+  },
+  "alert_channel": "digest",
+  "path": [
+    "~/.local/bin",
+    "~/.nvm/versions/node/v22.0.0/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin"
+  ],
+  "keep_runs": 30,
+  "cards": {
+    "brand": "DAILY NEWS"
+  },
+  "youtube": {
+    "channels": [
+      {"name": "AI Engineer", "url": "https://www.youtube.com/@aidotengineer"},
+      {"name": "Lenny's Podcast", "url": "https://www.youtube.com/@LennysPodcast"}
+    ]
+  },
+  "chat": {
+    "channel": "DISCORD_CHANNEL_ID",
+    "users": ["YOUR_DISCORD_USER_ID"],
+    "default_engine": "codex",
+    "workdir": "~",
+    "timeout": 3600,
+    "projects": {
+      "my-app": {"workdir": "~/code/my-app", "engine": "claude", "aliases": ["myapp", "앱"]}
+    }
+  }
+}
