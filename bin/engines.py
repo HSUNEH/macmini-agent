@@ -21,8 +21,8 @@ class EngineError(Exception):
 
 
 class Engine(NamedTuple):
-    # build(cwd, session_id or None, web_search, extra_dirs) -> argv; the prompt goes to stdin
-    build: Callable[[Path, Optional[str], bool, Sequence[Path]], List[str]]
+    # build(cwd, session_id or None, web_search, extra_dirs, effort or None) -> argv; the prompt goes to stdin
+    build: Callable[..., List[str]]
     # parse(full stdout) -> (reply text, session id)
     parse: Callable[[str], Tuple[str, Optional[str]]]
     # progress(one stdout line) -> short human-readable step, or None
@@ -46,8 +46,10 @@ def _json(line: str) -> Optional[dict]:
 
 # --- codex -------------------------------------------------------------------
 
-def _codex_build(cwd: Path, session: Optional[str], search: bool, dirs: Sequence[Path]) -> List[str]:
-    cmd = ["codex"] + (["--search"] if search else []) + ["--dangerously-bypass-approvals-and-sandbox", "exec"]
+def _codex_build(cwd: Path, session: Optional[str], search: bool, dirs: Sequence[Path],
+                 effort: Optional[str] = None) -> List[str]:
+    cmd = ["codex"] + (["--search"] if search else []) + (["-c", f'model_reasoning_effort="{effort}"'] if effort else [])
+    cmd += ["--dangerously-bypass-approvals-and-sandbox", "exec"]
     if session:
         return cmd + ["resume", "--skip-git-repo-check", "--json", session, "-"]
     return cmd + ["--skip-git-repo-check", "--json", "-C", str(cwd), "-"]
@@ -93,9 +95,12 @@ def _codex_progress(line: str) -> Optional[str]:
 
 # --- claude ------------------------------------------------------------------
 
-def _claude_build(cwd: Path, session: Optional[str], search: bool, dirs: Sequence[Path]) -> List[str]:
+def _claude_build(cwd: Path, session: Optional[str], search: bool, dirs: Sequence[Path],
+                  effort: Optional[str] = None) -> List[str]:
     # WebSearch/WebFetch are built in, so `search` needs no flag.
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"]
+    if effort:
+        cmd += ["--effort", effort]
     for d in dirs:
         cmd += ["--add-dir", str(d)]
     return cmd + (["--resume", session] if session else [])

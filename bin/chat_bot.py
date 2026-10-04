@@ -14,6 +14,7 @@ The scheduled jobs post into threads of the same channel; replying there starts 
 Commands (in any message):
   !claude / !codex [text]  switch engine, keeping the conversation; optionally ask right away
   !<project> [text]        point this thread at a project repo (new session); !home for ~
+  !effort [level]          this thread's effort (low/medium/high/xhigh/max, "default" to unset)
   !new                     forget the conversation: new sessions, same engine and folder
   !resume <session-id>     attach this thread to an existing session (e.g. one started in Orca)
   !stop                    stop the running task
@@ -58,13 +59,14 @@ DISCORD_NOTE = "(Discord에서 보낸 메시지입니다. 답은 Discord에 그�
 # The model ends a reply with this line to suggest moving the work to a project thread.
 HANDOFF = re.compile(r"^[ \t`]*<<project:([\w-]+)>>[ \t]*(.*?)[ \t`]*$", re.M)
 CARRY_TURNS, CARRY_CHARS = 12, 1500  # recent turns kept per thread for engine switches, chars per message
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # accepted by both `claude --effort` and codex
 STATUS_EVERY = 3.0  # seconds between status-message edits
 HOME_DIR = os.path.expanduser(CHAT.get("workdir", "~"))
 # "orca": Claude conversations run in visible Orca tabs (see orca_session.py); anything else: headless CLI.
 USE_ORCA = CHAT.get("backend") == "orca"
 HELP = ("프로젝트 개발 얘기면 그 프로젝트 스레드로 옮길지 버튼으로 물어봅니다: " + ", ".join(PROJECTS) + "\n"
         "`!<프로젝트>` 이 스레드를 그 프로젝트로 · `!home` 일반 대화로 · `!claude` / `!codex` 모델 변경\n"
-        "`!new` 새 세션 · `!resume <세션ID>` Orca 등에서 하던 세션 이어받기 · `!stop` 중단 · `!status` 상태\n"
+        "`!effort high` 이 스레드의 effort (low/medium/high/xhigh/max, `default`로 해제) · `!new` 새 세션 · `!resume <세션ID>` Orca 등에서 하던 세션 이어받기 · `!stop` 중단 · `!status` 상태\n"
         "`!kakao` 카카오 재로그인 (코드가 이 스레드로 옴) · `!restart` 봇 재시작 (다시 켜지면 이 스레드에 알림)")
 
 
@@ -216,10 +218,10 @@ class Status:
 
 
 async def run_engine(key: str, engine: str, session: Optional[str], workdir: str, prompt: str,
-                     status: Status) -> Tuple[str, Optional[str]]:
+                     status: Status, effort: Optional[str] = None) -> Tuple[str, Optional[str]]:
     eng = engines.ENGINES[engine]
     proc = await asyncio.create_subprocess_exec(
-        *eng.build(Path(workdir), session, True, []), cwd=workdir, env=engine_env(), start_new_session=True,
+        *eng.build(Path(workdir), session, True, [], effort), cwd=workdir, env=engine_env(), start_new_session=True,
         limit=32 * 1024 * 1024,  # stream-json lines can carry whole files
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     running[key] = proc
@@ -332,6 +334,25 @@ async def on_message(msg: discord.Message) -> None:
             conv["engine"] = cmd
             how = "전에 쓰던 세션에 그 사이 대화를 넘겨" if conv.get("sessions", {}).get(cmd) else "새 세션에 지금까지 대화를 넘겨"
             reply = f"이제 `{cmd}`로 이어갑니다 ({how}줍니다, 폴더 `{conv['workdir']}`)."
+        elif cmd == "effort":
+            level = rest.split()[0].lower() if rest else ""
+            rest = ""
+            if not level:
+                await target.send(f"effort: `{conv.get('effort') or '기본값'}` · 바꾸려면 `!effort {'|'.join(EFFORTS)}|default`")
+                return
+            if level not in EFFORTS + ("default",):
+                await target.send(f"`{level}`은 쓸 수 없습니다. {', '.join(EFFORTS)}, default 중에서 고르세요.")
+                return
+            if key in running:
+                await target.send("작업 중에는 바꿀 수 없습니다. 끝난 뒤에 다시 보내 주세요.")
+                return
+            if level == "default":
+                conv.pop("effort", None)
+            else:
+                conv["effort"] = level
+            if uses_orca(conv):  # the tab reopens on the next message with --resume and the new effort
+                await close_tab(conv)
+            reply = f"이 스레드의 effort를 `{conv.get('effort') or '기본값'}`로 바꿨습니다. 다음 메시지부터 적용됩니다 (대화는 이어집니다)."
         elif cmd == "new":
             await close_tab(conv)
             reset_session(conv)
@@ -360,7 +381,7 @@ async def on_message(msg: discord.Message) -> None:
             busy = " · 작업 중" if key in running else ""
             if uses_orca(conv) and conv.get("orca", {}).get("handle"):
                 busy += " · Orca 탭에서 진행 (같은 대화를 Orca에서 바로 이어 쓸 수 있음)"
-            await target.send(f"`{conv['project'] or '일반'}` · 모델 `{conv['engine']}` · 폴더 `{conv['workdir']}` · 세션 `{sid or '없음'}`{busy}{hint}")
+            await target.send(f"`{conv['project'] or '일반'}` · 모델 `{conv['engine']}` · effort `{conv.get('effort') or '기본값'}` · 폴더 `{conv['workdir']}` · 세션 `{sid or '없음'}`{busy}{hint}")
             return
         elif cmd == "restart":
             RESTART_MARK.parent.mkdir(parents=True, exist_ok=True)
@@ -420,7 +441,7 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
                 else:
                     if not sid:
                         full = f"{first_prompt(conv)}\n\n---\n\n{full}"
-                    reply_text, session = await run_engine(key, engine, sid, conv["workdir"], full, status)
+                    reply_text, session = await run_engine(key, engine, sid, conv["workdir"], full, status, conv.get("effort"))
         except (engines.EngineError, orca_session.OrcaError) as exc:
             await status.finish(False)
             hint = " 세션이 꼬였으면 `!new`로 새로 시작하세요." if sid and "!stop" not in str(exc) else ""

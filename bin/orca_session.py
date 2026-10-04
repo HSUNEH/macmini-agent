@@ -60,9 +60,10 @@ async def alive(handle: str) -> bool:
     return bool(t.get("connected")) and not t.get("orphaned") and t.get("agentIdentity") == "claude"
 
 
-async def open_tab(workdir: str, title: str, session_id: str, resume: bool, system_prompt: str) -> str:
+async def open_tab(workdir: str, title: str, session_id: str, resume: bool, system_prompt: str,
+                   effort: Optional[str] = None) -> str:
     cmd = ["claude", "--dangerously-skip-permissions", "--resume" if resume else "--session-id", session_id,
-           "--name", title]
+           "--name", title] + (["--effort", effort] if effort else [])
     if system_prompt:
         cmd += ["--append-system-prompt", system_prompt]
     t = (await orca("terminal", "create", "--worktree", f"path:{workdir}", "--title", title,
@@ -106,7 +107,8 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str,
     session_id = o.get("session") or str(uuid.uuid4())
     handle = o.get("handle")
     if not handle or not await alive(handle):
-        handle = await open_tab(workdir, title, session_id, resume=bool(o.get("session")), system_prompt=system_prompt)
+        handle = await open_tab(workdir, title, session_id, resume=bool(o.get("session")), system_prompt=system_prompt,
+                                effort=conv.get("effort"))
     o.update(handle=handle, session=session_id)
     on_handle(handle)
 
