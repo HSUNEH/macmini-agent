@@ -134,7 +134,8 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 
 ## 운영
 
-- **배포:** `./deploy.sh`는 맥의 `~/macmini_agent`로 rsync 후 launchd를 다시 등록합니다. 맥 쪽 코드가 마지막 배포 이후 바뀌었으면(예: Discord에서 봇에게 자기 코드를 고치게 한 경우) 덮어쓰지 않고 멈춥니다. `./pull.sh`로 가져와 `git diff`로 확인한 뒤 배포하세요.
+- **배포:** `./deploy.sh`는 맥의 `~/macmini_agent`로 rsync 후 launchd를 다시 등록합니다.
+- **맥에서 고친 코드:** 맥의 `~/macmini_agent`도 이 저장소의 git clone입니다. Discord에서 봇에게 자기 코드를 고치게 하면 그 자리에서 커밋하고 GitHub에 바로 푸시합니다(`CLAUDE.md`). 그래서 노트북에서는 `git pull` 후 배포하면 되고, 받지 않은 커밋이 있으면 `deploy.sh`가 멈춥니다. 푸시되지 않은 변경(예: `local/`)이 맥에 있으면 덮어쓰지 않고 멈추니 `./pull.sh`로 가져와 확인하세요.
 - **런타임 데이터:** 맥의 `~/.macmini-agent/` — `.env`(비밀값), `state/`(중복 방지 기록, 대화 세션), `data/`, `runs/<작업>/<시각>/`(프롬프트·로그·결과, 최근 30개), `logs/`
 - **LLM과 무관한 상주 작업:** `local/launchd/*.plist`에 두면 그대로 설치됩니다.
 - **모델이 막히면:** 구독 CLI의 기본 모델이 계정에서 막히는 경우가 있습니다. 실패 알림이 오면 맥의 `~/.codex/config.toml`(또는 claude 설정)에서 모델을 바꾸세요.
