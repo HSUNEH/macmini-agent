@@ -34,7 +34,7 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Awaitable, Dict, List, Optional, Tuple
 
 import discord
 
@@ -135,6 +135,18 @@ class HandoffView(discord.ui.View):
 def reset_session(conv: dict) -> None:
     """Forget the conversation: no engine sessions, empty log."""
     conv.update(sessions={}, seen={}, log=[], turns=0)
+
+
+async def new_thread(make: Awaitable[discord.Thread]) -> discord.Thread:
+    """Create a thread and add the chat users to it: Discord lists a thread under the channel in the
+    sidebar only for its members, and bot-created threads have none."""
+    thread = await make
+    for uid in CHAT["users"]:
+        try:
+            await thread.add_user(discord.Object(id=int(uid)))
+        except (ValueError, discord.HTTPException):
+            pass
+    return thread
 
 
 async def close_tab(conv: dict) -> None:
@@ -312,7 +324,7 @@ async def on_message(msg: discord.Message) -> None:
         if m and m.group(1).lower() in PROJECTS:
             title = f"[{m.group(1).lower()}] {m.group(2).strip() or '대화'}"
         try:
-            target = await msg.create_thread(name=title[:95])
+            target = await new_thread(msg.create_thread(name=title[:95]))
         except discord.HTTPException:
             pass  # no thread permission: converse in the channel itself
     key = str(target.id)
@@ -486,8 +498,9 @@ async def on_interaction(inter: discord.Interaction) -> None:
     target = origin
     if isinstance(parent, discord.TextChannel):
         try:
-            target = await parent.create_thread(name=f"[{name}] {request.splitlines()[0]}"[:95],
-                                                type=discord.ChannelType.public_thread)
+            short = re.split(r"[.:(\n]", request, 1)[0].strip()[:40]  # keep the sidebar name short
+            target = await new_thread(parent.create_thread(name=f"[{name}] {short}"[:95],
+                                                           type=discord.ChannelType.public_thread))
             await origin.send(f"➡️ {target.mention}에서 이어갑니다.")
         except discord.HTTPException:
             pass  # no thread permission: switch this conversation in place
