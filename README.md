@@ -108,6 +108,7 @@ engine: codex                  # codex | claude | none(pre만 실행)
 search: true                   # 웹 검색
 timeout: 1800
 cards: true                    # 카드뉴스로 보내기 (없으면 messages.json 텍스트)
+also_messages: true            # 카드와 함께 messages.json도 전송 (예: ✅ 승인 후보)
 pre: bin/youtube_collect.py    # LLM 전에 실행, 출력은 RUN_DIR/pre.json. {"skip": true}를 내면 LLM 생략
 after: bin/youtube_collect.py mark-seen   # 전송 성공 후 실행
 notify: digest                 # engine: none일 때 pre 출력을 보낼 곳

@@ -270,7 +270,7 @@ def validate(spec: Dict) -> None:
     if not isinstance(spec, dict) or not isinstance(spec.get("items"), list):
         raise ValueError("cards.json needs an object with an items list")
     for i, it in enumerate(spec["items"]):
-        for key in ("headline", "summary", "url"):
+        for key in ("headline", "summary"):
             if not str(it.get(key) or "").strip():
                 raise ValueError(f"cards.json items[{i}] is missing {key}")
     if len(spec["items"]) > 9:  # cover + 9 = Discord's 10-attachment limit
