@@ -32,7 +32,7 @@ LLM은 Discord 토큰을 모릅니다. 보낼 내용을 파일로 쓰면 스크�
 | 카드뉴스 | `cards: true`인 작업은 LLM이 내용만 쓰고, 템플릿이 1080×1350 PNG로 그려 Discord에 올림 (헤드리스 Chrome). 원문 대표 이미지(Open Graph)와 매체 로고를 자동으로 넣으며, 한글·숫자가 깨지지 않음 |
 | 대화 봇 | 채널에 쓰면 스레드가 열리고 스레드마다 CLI 세션 하나. 작업 중 `!stop`, 모델 전환 `!claude`/`!codex`(대화 유지) |
 | 프로젝트 개발 | 대화가 등록된 프로젝트 개발이면 모델이 `[프로젝트] 스레드에서 이어가기` 버튼을 달고, 누르면 그 레포 폴더에서 새 세션이 시작됨 |
-| Orca 연동 (`backend: orca`) | Claude 대화가 맥의 [Orca](https://github.com/stablyai/orca) 안의 실제 탭으로 열림. 메인 스레드는 메인 워크스페이스 탭, 프로젝트 스레드는 그 레포 탭. Discord에서 하던 대화를 Orca에서 바로 보고 이어 쓸 수 있음 |
+| Orca 연동 (`backend: orca`) | Claude·Codex 대화가 맥의 [Orca](https://github.com/stablyai/orca) 안의 실제 탭으로 열림. 메인 스레드는 메인 워크스페이스 탭, 프로젝트 스레드는 그 레포 탭. Discord에서 하던 대화를 Orca에서 바로 보고 이어 쓸 수 있고, 선택 창·플랜 승인·`/mcp` 같은 화면도 Discord에서 버튼으로 조작 |
 | 터미널과 세션 공유 | `!status`가 알려주는 `cd <폴더> && claude --resume <id>`로 맥에서 이어서 작업, 반대로 `!resume <id>` |
 | 모델 교체 | `bin/engines.py`에 CLI 하나당 build/parse/progress 함수만 쓰면 새 모델 추가 |
 | (선택) YouTube | 지정한 채널의 새 영상 자막을 받아 요약. 새 영상 없으면 LLM 호출 안 함 |
@@ -94,10 +94,12 @@ Discord 메인 채널에 글   → 새 스레드  ⇄  Orca [assistant › main]
                            → 새 스레드 ⇄  Orca [redbox › main] 새 Claude 탭     (그 레포의 CLAUDE.md·스킬)
 ```
 
-- 탭은 `claude --dangerously-skip-permissions --session-id <id>`로 열리고, 봇은 Orca CLI로 메시지를 입력한 뒤 세션 기록 파일을 읽어 진행 상황과 답을 Discord로 보냅니다.
+- 탭은 `claude --dangerously-skip-permissions --session-id <id>` 또는 `codex --dangerously-bypass-approvals-and-sandbox`로 열리고, 봇은 Orca CLI로 메시지를 입력한 뒤 세션 기록 파일(`~/.claude/projects/…`, `~/.codex/sessions/…`)을 읽어 진행 상황과 답을 Discord로 보냅니다.
+- CLI가 답 대신 화면을 띄우면(선택 창, 플랜 승인, `/mcp`·`/model` 메뉴 등) 봇이 탭의 실제 화면을 Discord에 올리고 `↑ ↓ Enter Esc 1-4 ⇧Tab` 버튼을 붙입니다. 버튼을 누르면 그 키가 탭에 입력되고, 이어지는 답이나 바뀐 화면이 다시 옵니다. `!screen`으로 언제든 화면을 볼 수 있습니다.
+- `/`로 시작하는 메시지(`/compact`, `/mcp`, `/model` …)는 탭에 그대로 입력됩니다. 플랜 모드는 `⇧Tab` 버튼으로 전환합니다.
 - 탭을 닫거나 Orca가 재시작돼도 다음 메시지에서 `--resume`으로 같은 세션을 다시 엽니다. Orca에서 직접 이어 쓴 내용도 같은 세션에 남습니다.
-- `./deploy.sh`가 메인 폴더(`git init` 포함)와 프로젝트를 Orca 워크스페이스로 등록하고, Claude의 폴더 신뢰 확인을 미리 처리합니다. 메인 폴더의 `CLAUDE.md`는 `local/main/CLAUDE.md`(예시: `examples/main/`)로 관리합니다.
-- 지금은 Claude만 Orca 탭으로 돕니다. `!codex`는 백그라운드 `codex exec`로 실행됩니다.
+- `./deploy.sh`가 메인 폴더(`git init` 포함)와 프로젝트를 Orca 워크스페이스로 등록하고, Claude의 폴더 신뢰 확인을 미리 처리합니다(Codex는 탭을 열 때 처리). 메인 폴더의 `CLAUDE.md`는 `local/main/CLAUDE.md`(예시: `examples/main/`)로 관리합니다.
+- `!claude`/`!codex`로 모델을 바꾸면 탭도 그 CLI로 바뀌고, 각 모델의 세션은 따로 이어집니다.
 
 ## 작업 파일 형식
 
@@ -128,6 +130,8 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 | `!claude` / `!codex` | 모델 전환. 최근 대화를 넘겨줘서 맥락 유지 |
 | `!effort <단계>` | 이 스레드의 effort: `low`·`medium`·`high`·`xhigh`·`max`, `default`면 해제. 대화는 이어짐 (claude는 `--effort`, codex는 `model_reasoning_effort`) |
 | `!new` · `!stop` · `!status` | 새 세션 · 실행 중단 · 상태와 터미널 이어가기 명령 |
+| `/mcp`, `/compact` … | (Orca) 탭에 그대로 입력. 화면이 뜨면 키 버튼과 함께 옴 |
+| `!screen` | (Orca) 지금 탭 화면 + 키 버튼 |
 | `!resume <세션ID>` | 터미널에서 하던 세션을 이 스레드로 |
 | `!restart` | 진행 중 작업이 끝나면 봇 재시작, 다시 켜지면 알림 |
 | `!kakao` | (카카오) 재로그인 코드를 이 스레드로 받기 |
@@ -148,7 +152,7 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 bin/run_job.py        예약 작업 실행기
 bin/chat_bot.py       Discord 대화 봇 (launchd 상주, discord.py)
 bin/engines.py        CLI 정의: codex, claude
-bin/orca_session.py   Orca 탭에서 claude 세션 운영 (backend: orca)
+bin/orca_session.py   Orca 탭에서 claude·codex 세션 운영 (backend: orca)
 bin/cards.py          카드뉴스 렌더러
 bin/discord_api.py    Discord REST (전송, 첨부, 반응, ✅ 승인 조회)
 bin/install.py        launchd 등록 (맥에서 실행됨)

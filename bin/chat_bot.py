@@ -18,6 +18,8 @@ Commands (in any message):
   !new                     forget the conversation: new sessions, same engine and folder
   !resume <session-id>     attach this thread to an existing session (e.g. one started in Orca)
   !stop                    stop the running task
+  !screen                  (orca) show the tab's screen with key buttons (↑ ↓ Enter Esc 1-4 Shift+Tab)
+  /command                 (orca) typed into the tab as is: /mcp, /compact, /model, ...
   !kakao                   Kakao re-login; the phone code is posted in this thread
   !restart                 restart the bot after running tasks finish; it says so here when it is back
   !status / !help
@@ -62,11 +64,12 @@ CARRY_TURNS, CARRY_CHARS = 12, 1500  # recent turns kept per thread for engine s
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # accepted by both `claude --effort` and codex
 STATUS_EVERY = 3.0  # seconds between status-message edits
 HOME_DIR = os.path.expanduser(CHAT.get("workdir", "~"))
-# "orca": Claude conversations run in visible Orca tabs (see orca_session.py); anything else: headless CLI.
+# "orca": conversations run in visible Orca tabs (see orca_session.py); anything else: headless CLI.
 USE_ORCA = CHAT.get("backend") == "orca"
 HELP = ("프로젝트 개발 얘기면 그 프로젝트 스레드로 옮길지 버튼으로 물어봅니다: " + ", ".join(PROJECTS) + "\n"
         "`!<프로젝트>` 이 스레드를 그 프로젝트로 · `!home` 일반 대화로 · `!claude` / `!codex` 모델 변경\n"
         "`!effort high` 이 스레드의 effort (low/medium/high/xhigh/max, `default`로 해제) · `!new` 새 세션 · `!resume <세션ID>` Orca 등에서 하던 세션 이어받기 · `!stop` 중단 · `!status` 상태\n"
+        "`/mcp`·`/compact` 같은 `/명령`은 탭에 그대로 입력 · `!screen` 탭 화면과 키 버튼 · 선택 창·메뉴가 뜨면 화면이 자동으로 옴\n"
         "`!kakao` 카카오 재로그인 (코드가 이 스레드로 옴) · `!restart` 봇 재시작 (다시 켜지면 이 스레드에 알림)")
 
 
@@ -151,16 +154,37 @@ async def new_thread(make: Awaitable[discord.Thread]) -> discord.Thread:
 
 async def close_tab(conv: dict) -> None:
     """Close the thread's Orca tab (if any) before the thread starts over or moves folders."""
-    handle = (conv.pop("orca", None) or {}).get("handle")
-    if handle:
-        try:
-            await orca_session.orca("terminal", "close", "--terminal", handle, timeout=30)
-        except orca_session.OrcaError:
-            pass
+    await orca_session.close((conv.pop("orca", None) or {}).get("handle"))
 
 
 def uses_orca(conv: dict) -> bool:
-    return USE_ORCA and conv.get("engine") == "claude"
+    return USE_ORCA
+
+
+class KeysView(discord.ui.View):
+    """Key buttons under a tab screen. Clicks are handled in on_interaction by custom_id ("key:<name>")."""
+    LABELS = [("up", "↑"), ("down", "↓"), ("enter", "⏎ Enter"), ("esc", "Esc"), ("screen", "🔄"),
+              ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("stab", "⇧Tab")]
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        for i, (name, label) in enumerate(self.LABELS):
+            self.add_item(discord.ui.Button(label=label, custom_id=f"key:{name}", row=i // 5,
+                                            style=discord.ButtonStyle.primary if name == "enter" else discord.ButtonStyle.secondary))
+
+
+def screen_text(screen: str) -> str:
+    body = screen.replace("```", "ˋˋˋ")[-1800:]
+    return f"🖥️ 탭 화면 · 버튼으로 키를 보내거나, 메시지를 쓰면 그대로 입력됩니다\n```\n{body or ' '}\n```"
+
+
+async def post_screen(target: discord.abc.Messageable, conv: dict) -> None:
+    handle = (conv.get("orca") or {}).get("handle")
+    if not handle:
+        await target.send("열린 Orca 탭이 없습니다. 메시지를 보내면 탭이 열립니다.")
+        return
+    await target.send(screen_text(await orca_session.screen(handle)), view=KeysView(),
+                      allowed_mentions=discord.AllowedMentions.none())
 
 
 def clip(text: str) -> str:
@@ -374,7 +398,7 @@ async def on_message(msg: discord.Message) -> None:
             conv.setdefault("sessions", {})[conv["engine"]] = sid
             if uses_orca(conv):  # the next message reopens this session in an Orca tab
                 await close_tab(conv)
-                conv["orca"] = {"workdir": conv["workdir"], "session": sid}
+                conv["orca"] = {"workdir": conv["workdir"], "engine": conv["engine"], "session": sid}
             conv.setdefault("seen", {})[conv["engine"]] = conv.get("turns", 0)
             reply = f"`{conv['engine']}` 세션 `{sid}`을 이어갑니다. 다른 모델 세션이면 먼저 `!claude`/`!codex`로 바꾸세요."
         elif cmd == "stop":
@@ -392,7 +416,7 @@ async def on_message(msg: discord.Message) -> None:
             hint = f"\n터미널에서 이어가기: `cd {conv['workdir']} && {engines.ENGINES[conv['engine']].resume_hint(sid)}`" if sid else ""
             busy = " · 작업 중" if key in running else ""
             if uses_orca(conv) and conv.get("orca", {}).get("handle"):
-                busy += " · Orca 탭에서 진행 (같은 대화를 Orca에서 바로 이어 쓸 수 있음)"
+                busy += " · Orca 탭에서 진행 (같은 대화를 Orca에서 바로 이어 쓸 수 있음, `!screen`으로 화면 보기)"
             await target.send(f"`{conv['project'] or '일반'}` · 모델 `{conv['engine']}` · effort `{conv.get('effort') or '기본값'}` · 폴더 `{conv['workdir']}` · 세션 `{sid or '없음'}`{busy}{hint}")
             return
         elif cmd == "restart":
@@ -405,6 +429,9 @@ async def on_message(msg: discord.Message) -> None:
                     await asyncio.sleep(5)
             await target.send("재시작합니다. 다시 켜지면 여기에 알려드릴게요.")
             await client.close()  # launchd KeepAlive starts the bot again
+            return
+        elif cmd == "screen":
+            await post_screen(target, conv)
             return
         elif cmd == "help":
             await target.send(HELP)
@@ -424,32 +451,42 @@ async def on_message(msg: discord.Message) -> None:
                 return
             text = rest
 
+    if uses_orca(conv) and text.startswith("/") and not msg.attachments:  # a CLI command (/mcp, /compact, ...)
+        await ask(target, key, conv, text, msg, raw=True)
+        return
     prompt = text + await save_attachments(msg, key)
     if prompt.strip():
         await ask(target, key, conv, prompt, msg)
 
 
 async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str,
-              msg: Optional[discord.Message] = None) -> None:
-    """Run one prompt in the conversation's engine session and post the reply."""
+              msg: Optional[discord.Message] = None, raw: bool = False, press: Optional[str] = None) -> None:
+    """Run one prompt in the conversation's engine session and post the reply. raw: send the text
+    to the tab as typed (a /command); press: type one key into the tab instead of a message."""
     lock = locks.setdefault(key, asyncio.Lock())
     if lock.locked() and msg:
         await msg.add_reaction("⏳")  # queued behind the running task
     async with lock:
         engine = conv["engine"]
         sid = conv.setdefault("sessions", {}).get(engine)
-        full = carryover(conv, engine) + prompt
+        full = prompt if raw or press else carryover(conv, engine) + prompt
         status = Status(target, engine)
+        waiting = False
         try:
             async with target.typing():
                 if uses_orca(conv):
                     title = (getattr(target, "name", None) or "discord")[:60]
+                    timeout = int(CHAT.get("timeout", 3600))
                     try:
-                        reply_text, session = await orca_session.run(
-                            conv, title, full, first_prompt(conv), status.add,
-                            lambda handle: running.__setitem__(key, ("orca", handle)))
+                        if press:
+                            running[key] = ("orca", conv["orca"]["handle"])
+                            out = await orca_session.press(conv, press, status.add, timeout)
+                        else:
+                            out = await orca_session.run(conv, title, full, first_prompt(conv), status.add,
+                                                         lambda handle: running.__setitem__(key, ("orca", handle)), timeout)
                     finally:
                         running.pop(key, None)
+                    reply_text, session, waiting = out["reply"], out["session"], out["waiting"]
                 else:
                     if not sid:
                         full = f"{first_prompt(conv)}\n\n---\n\n{full}"
@@ -463,17 +500,20 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
         reply_text, handoff = take_handoff(reply_text, conv)
         if session:
             conv["sessions"][engine] = session
-        conv["turns"] = conv.get("turns", 0) + 1
-        conv["log"] = (conv.get("log", []) + [{"n": conv["turns"], "engine": engine,
-                                               "user": clip(prompt), "reply": clip(reply_text)}])[-CARRY_TURNS:]
-        conv.setdefault("seen", {})[engine] = conv["turns"]
+        if reply_text and not raw and not press:
+            conv["turns"] = conv.get("turns", 0) + 1
+            conv["log"] = (conv.get("log", []) + [{"n": conv["turns"], "engine": engine,
+                                                   "user": clip(prompt), "reply": clip(reply_text)}])[-CARRY_TURNS:]
+        conv.setdefault("seen", {})[engine] = conv.get("turns", 0)
         if handoff:
             conv.setdefault("handoffs", {})[handoff[0]] = handoff[1]
         conv["updated_at"] = datetime.now().isoformat(timespec="seconds")
         sessions[key] = conv
         save_sessions()
-        for chunk in split_text(reply_text) or ["(빈 응답)"]:
+        for chunk in split_text(reply_text) or ([] if uses_orca(conv) else ["(빈 응답)"]):
             await target.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+        if uses_orca(conv) and (waiting or not reply_text):  # a choice, approval or menu: show the tab
+            await post_screen(target, conv)
         if handoff:
             await target.send(f"🔎 `{handoff[0]}` 프로젝트로 감지됐어요! 새 세션으로 이어서 작업할까요?\n> {handoff[1][:300]}",
                               view=HandoffView(handoff[0]), allowed_mentions=discord.AllowedMentions.none())
@@ -481,12 +521,16 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
 
 @client.event
 async def on_interaction(inter: discord.Interaction) -> None:
-    """The handoff button: open a [project] thread with a fresh repo session and send it the request."""
+    """Buttons: key:<name> types a key into the thread's Orca tab; handoff:<project> opens a
+    [project] thread with a fresh repo session and sends it the request."""
     custom_id = (inter.data or {}).get("custom_id", "")
-    if inter.type is not discord.InteractionType.component or not custom_id.startswith("handoff:"):
+    if inter.type is not discord.InteractionType.component or not custom_id.startswith(("handoff:", "key:")):
         return
     if str(inter.user.id) not in CHAT["users"]:
         await inter.response.send_message("이 버튼은 쓸 수 없습니다.", ephemeral=True)
+        return
+    if custom_id.startswith("key:"):
+        await on_key(inter, custom_id.split(":", 1)[1])
         return
     name, origin = custom_id.split(":", 1)[1], inter.channel
     request = sessions.get(str(origin.id), {}).get("handoffs", {}).pop(name, None)
@@ -511,6 +555,22 @@ async def on_interaction(inter: discord.Interaction) -> None:
     sessions[key] = conv
     save_sessions()
     await ask(target, key, conv, request)
+
+
+async def on_key(inter: discord.Interaction, name: str) -> None:
+    key, target = str(inter.channel.id), inter.channel
+    conv = sessions.get(key) or {}
+    handle = (conv.get("orca") or {}).get("handle")
+    if not handle or (name != "screen" and name not in orca_session.KEYS):
+        await inter.response.send_message("열린 Orca 탭이 없습니다.", ephemeral=True)
+        return
+    await inter.response.edit_message(view=None)  # this screen is now stale; a fresh one follows
+    if name == "screen":
+        await post_screen(target, conv)
+    elif locks.setdefault(key, asyncio.Lock()).locked():  # a turn is running: just type the key (e.g. Esc)
+        await orca_session.orca("terminal", "send", "--terminal", handle, "--text", orca_session.KEYS[name], timeout=30)
+    else:
+        await ask(target, key, conv, "", press=name)
 
 
 def main() -> int:
