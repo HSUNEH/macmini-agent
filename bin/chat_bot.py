@@ -443,6 +443,9 @@ async def on_message(msg: discord.Message) -> None:
                                                         env=env, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             asyncio.ensure_future(proc.wait())
             return
+        if reply is None:  # unknown !command: never pass it on (in a CLI tab "!" runs a shell command)
+            await target.send(f"`!{cmd}`은 봇 명령이 아닙니다. `!help`로 명령을 보거나, CLI 명령은 `/{cmd}`처럼 보내세요.")
+            return
         if reply is not None:  # a state-changing command
             sessions[key] = conv
             save_sessions()
