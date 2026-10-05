@@ -86,10 +86,10 @@ ssh macmini '~/macmini_agent/bin/run_job.py ai-news --dry-run'   # Discord로 �
 
 ## Orca 연동 (선택)
 
-맥에 Orca가 켜져 있으면 `local/config.json`의 `chat.backend`를 `"orca"`로 바꾸세요. `chat.workdir`(예: `~/assistant`)가 메인 워크스페이스가 됩니다.
+맥에 Orca가 켜져 있으면 `local/config.json`의 `chat.backend`를 `"orca"`로 바꾸세요. `chat.workdir`(예: `~/macmini-discord`)가 메인 워크스페이스가 됩니다.
 
 ```
-Discord 메인 채널에 글   → 새 스레드  ⇄  Orca [assistant › main] 새 Claude 탭  (메인 = 전체 관장, memory/ 에 장기기억)
+Discord 메인 채널에 글   → 새 스레드  ⇄  Orca [macmini-discord › main] 새 탭  (메인 = 전체 관장, memory/ 에 장기기억)
 대화 중 프로젝트 감지    → "redbox 프로젝트로 감지됐어요! 새 세션으로 이어갈까요?" [이어가기]
                            → 새 스레드 ⇄  Orca [redbox › main] 새 Claude 탭     (그 레포의 CLAUDE.md·스킬)
 ```

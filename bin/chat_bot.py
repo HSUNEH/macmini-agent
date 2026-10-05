@@ -2,7 +2,7 @@
 """Discord front-end for the real Claude Code / Codex CLIs on the Mac mini.
 
 Everything lives in one channel (local/config.json "chat.channel") plus DMs:
-a new message opens a thread, and each thread is one CLI session, a general assistant in ~.
+a new message opens a thread, and each thread is one CLI session, a general assistant in the main workspace (chat.workdir).
 When a request is development work on a project in "chat.projects", the model says so and
 ends its reply with a <<project:name>> line; the bot turns that into a button that opens a
 "[name] ..." thread whose session runs inside that repo, so its CLAUDE.md / AGENTS.md /

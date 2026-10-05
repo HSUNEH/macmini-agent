@@ -280,6 +280,10 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
     """Send one message (or a raw /command) to the thread's tab and collect the outcome."""
     o = await ensure_tab(conv, title, system_prompt)
     on_handle(o["handle"])
+    # the tab may still be busy (a turn typed in Orca, or one the bot lost track of across a restart):
+    # text sent now would sit in the input box, so wait for it to finish first
+    await orca("terminal", "wait", "--terminal", o["handle"], "--for", "tui-idle",
+               "--timeout-ms", str(timeout * 1000), timeout=timeout + 60)
     mark(o)
     send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", prompt, "--enter",
                        "--wait-submit", "20", timeout=60))["send"]
