@@ -125,7 +125,7 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 
 | 명령 | 동작 |
 |---|---|
-| (그냥 쓰기) | 채널에 쓰면 새 스레드 + 새 세션, 스레드 안에 쓰면 이어서 |
+| (그냥 쓰기) | 채널에 쓰면 새 스레드 + 새 세션, 스레드 안에 쓰면 이어서. 작업 중에 보낸 메시지는 ⏳를 달고 모아 뒀다가 끝나면 한 번에 보냄 |
 | `!<프로젝트> 할 일` | 그 레포 폴더의 새 세션으로 시작 (`!home`은 일반 대화로) |
 | `!claude` / `!codex` | 모델 전환. 최근 대화를 넘겨줘서 맥락 유지 |
 | `!effort <단계>` | 이 스레드의 effort: `low`·`medium`·`high`·`xhigh`·`max`, `default`면 해제. 대화는 이어짐 (claude는 `--effort`, codex는 `model_reasoning_effort`) |

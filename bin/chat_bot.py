@@ -310,6 +310,7 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 locks: Dict[str, asyncio.Lock] = {}
 running: Dict[str, asyncio.subprocess.Process] = {}
+pending: Dict[str, List[Tuple[str, Optional[discord.Message]]]] = {}  # messages that arrived while busy
 sessions = load_sessions()
 announced = False
 
@@ -456,14 +457,45 @@ async def on_message(msg: discord.Message) -> None:
 
     if uses_orca(conv) and text.startswith("/") and not msg.attachments:  # a CLI command (/mcp, /compact, ...)
         await ask(target, key, conv, text, msg, raw=True)
+        await flush(target, key, conv)
         return
     prompt = text + await save_attachments(msg, key)
     if prompt.strip():
-        await ask(target, key, conv, prompt, msg)
+        await submit(target, key, conv, prompt, msg)
+
+
+async def submit(target: discord.abc.Messageable, key: str, conv: dict, prompt: str,
+                 msg: Optional[discord.Message] = None) -> None:
+    """Send a message, or queue it while the thread is busy; whatever piled up goes out together,
+    as one message, as soon as the running turn ends."""
+    pending.setdefault(key, []).append((prompt, msg))
+    if locks.setdefault(key, asyncio.Lock()).locked():
+        if msg:
+            await msg.add_reaction("⏳")
+        return
+    await flush(target, key, conv)
+
+
+async def flush(target: discord.abc.Messageable, key: str, conv: dict) -> None:
+    """Send the queued messages; keep them if the tab is waiting on a choice (sent after it)."""
+    while pending.get(key) and not locks.setdefault(key, asyncio.Lock()).locked():
+        batch = pending.pop(key)
+        out = await ask(target, key, conv, "\n\n".join(text for text, _ in batch))
+        for _, m in batch:
+            if m:
+                try:
+                    await m.remove_reaction("⏳", client.user)
+                except discord.HTTPException:
+                    pass
+        if out.get("blocked"):
+            pending[key] = batch + pending.get(key, [])
+            return
+        if out.get("error"):
+            return
 
 
 async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str,
-              msg: Optional[discord.Message] = None, raw: bool = False, press: Optional[str] = None) -> None:
+              msg: Optional[discord.Message] = None, raw: bool = False, press: Optional[str] = None) -> dict:
     """Run one prompt in the conversation's engine session and post the reply. raw: send the text
     to the tab as typed (a /command); press: type one key into the tab instead of a message."""
     lock = locks.setdefault(key, asyncio.Lock())
@@ -498,7 +530,7 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
             await status.finish(False)
             hint = " 세션이 꼬였으면 `!new`로 새로 시작하세요." if sid and "!stop" not in str(exc) else ""
             await target.send(f"⚠️ {str(exc)[:1500]}{hint}")
-            return
+            return {"error": True}
         await status.finish(True)
         reply_text, handoff = take_handoff(reply_text, conv)
         if session:
@@ -516,12 +548,13 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
         for chunk in split_text(reply_text) or ([] if uses_orca(conv) else ["(빈 응답)"]):
             await target.send(chunk, allowed_mentions=discord.AllowedMentions.none())
         if uses_orca(conv) and out.get("blocked"):
-            await target.send("⏸️ 탭이 아래 화면에서 선택을 기다리고 있어서 메시지를 넣지 못했어요. 버튼으로 처리한 뒤 다시 보내 주세요.")
+            await target.send("⏸️ 탭이 아래 화면에서 선택을 기다리고 있어요. 메시지는 모아 뒀다가, 버튼으로 처리하면 이어서 보낼게요.")
         if uses_orca(conv) and (waiting or not reply_text):  # a choice, approval or menu: show the tab
             await post_screen(target, conv)
         if handoff:
             await target.send(f"🔎 `{handoff[0]}` 프로젝트로 감지됐어요! 새 세션으로 이어서 작업할까요?\n> {handoff[1][:300]}",
                               view=HandoffView(handoff[0]), allowed_mentions=discord.AllowedMentions.none())
+        return out
 
 
 @client.event
@@ -560,6 +593,7 @@ async def on_interaction(inter: discord.Interaction) -> None:
     sessions[key] = conv
     save_sessions()
     await ask(target, key, conv, request)
+    await flush(target, key, conv)
 
 
 async def on_key(inter: discord.Interaction, name: str) -> None:
@@ -574,8 +608,8 @@ async def on_key(inter: discord.Interaction, name: str) -> None:
         await post_screen(target, conv)
     elif locks.setdefault(key, asyncio.Lock()).locked():  # a turn is running: just type the key (e.g. Esc)
         await orca_session.orca("terminal", "send", "--terminal", handle, "--text", orca_session.KEYS[name], timeout=30)
-    else:
-        await ask(target, key, conv, "", press=name)
+    elif not (await ask(target, key, conv, "", press=name)).get("waiting"):
+        await flush(target, key, conv)  # the choice is done: send what was queued behind it
 
 
 def main() -> int:
