@@ -284,9 +284,18 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
     # text sent now would sit in the input box, so wait for it to finish first
     await orca("terminal", "wait", "--terminal", o["handle"], "--for", "tui-idle",
                "--timeout-ms", str(timeout * 1000), timeout=timeout + 60)
+    # a choice or dialog on screen (e.g. how to resume a long session) blocks typed prompts:
+    # report it so the bot shows the screen with key buttons instead of failing
+    if await waiting(o["handle"]):
+        return {"reply": "", "session": o.get("session"), "waiting": True, "blocked": True}
     mark(o)
-    send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", prompt, "--enter",
-                       "--wait-submit", "20", timeout=60))["send"]
+    try:
+        send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", prompt, "--enter",
+                           "--wait-submit", "20", timeout=60))["send"]
+    except OrcaError as exc:
+        if "agent_prompt_blocked" not in str(exc):
+            raise
+        return {"reply": "", "session": o.get("session"), "waiting": True, "blocked": True}
     if not send.get("accepted"):
         raise OrcaError("Orca 탭이 메시지를 받지 않았습니다")
     return await collect(conv, on_step, timeout)

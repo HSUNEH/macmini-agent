@@ -474,7 +474,7 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
         sid = conv.setdefault("sessions", {}).get(engine)
         full = prompt if raw or press else carryover(conv, engine) + prompt
         status = Status(target, engine)
-        waiting = False
+        waiting, out = False, {}
         try:
             async with target.typing():
                 if uses_orca(conv):
@@ -515,6 +515,8 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
         save_sessions()
         for chunk in split_text(reply_text) or ([] if uses_orca(conv) else ["(빈 응답)"]):
             await target.send(chunk, allowed_mentions=discord.AllowedMentions.none())
+        if uses_orca(conv) and out.get("blocked"):
+            await target.send("⏸️ 탭이 아래 화면에서 선택을 기다리고 있어서 메시지를 넣지 못했어요. 버튼으로 처리한 뒤 다시 보내 주세요.")
         if uses_orca(conv) and (waiting or not reply_text):  # a choice, approval or menu: show the tab
             await post_screen(target, conv)
         if handoff:
