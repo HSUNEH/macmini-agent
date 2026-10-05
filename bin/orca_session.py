@@ -201,7 +201,25 @@ async def ensure_tab(conv: dict, title: str, system_prompt: str) -> dict:
                        "--timeout-ms", str(READY_TIMEOUT_MS), timeout=READY_TIMEOUT_MS / 1000 + 30))["wait"]
     if not wait.get("satisfied") and not wait.get("blockedReason"):  # a dialog on start shows up as a screen
         raise OrcaError(f"Orca의 {engine} 탭이 준비되지 않았습니다 ({wait.get('status')})")
+    await asyncio.sleep(1.0)  # a just-started CLI can drop keys typed the moment it reports idle
     return o
+
+
+_typing: Dict[str, asyncio.Lock] = {}  # one typist per tab, so concurrent messages don't interleave
+
+
+async def type_in(handle: str, text: str) -> None:
+    """Type text and press Enter as raw keys. `orca terminal send --enter` is much slower (it watches
+    for the turn to start before returning, ~8s, and handles one send at a time); a short pause
+    before Enter keeps codex from taking a fast paste's Enter as a newline."""
+    async with _typing.setdefault(handle, asyncio.Lock()):
+        await _type(handle, text)
+
+
+async def _type(handle: str, text: str) -> None:
+    await orca("terminal", "send", "--terminal", handle, "--text", text, timeout=60)
+    await asyncio.sleep(0.3)
+    await orca("terminal", "send", "--terminal", handle, "--text", "\r", timeout=30)
 
 
 async def screen(handle: str, rows: int = 30) -> str:
@@ -269,7 +287,7 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
         if got:
             inflight = o.get("inflight") or []
             for i, text in enumerate(inflight):
-                if text.strip() and text.strip() in got:
+                if text.strip() and text.strip()[:60] in got:
                     del inflight[i]
                     break
 
@@ -299,10 +317,15 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
         waiter = asyncio.ensure_future(orca("terminal", "wait", "--terminal", handle, "--for", "tui-idle",
                                             "--timeout-ms", str(timeout * 1000), timeout=timeout + 60))
         try:
+            wait = None
             while not waiter.done():
                 await drain()
+                # codex marks the end of a turn (task_complete); its tab takes ~10s more to look idle
+                if engine == "codex" and state["last"] == "answer" and not o.get("inflight") and state["queued"] <= 0:
+                    wait = {"satisfied": True}
+                    break
                 await asyncio.sleep(POLL_SECONDS)
-            wait = waiter.result()["wait"]
+            wait = wait or waiter.result()["wait"]
         finally:
             waiter.cancel()
         await asyncio.sleep(0.5)
@@ -335,21 +358,10 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
     if await waiting(o["handle"]):
         return {"reply": "", "session": o.get("session"), "waiting": True, "blocked": True}
     mark(o)
-    try:
-        if prompt.startswith("/"):  # a /command starts no turn: type it plus a plain Enter key, so Orca
-            # doesn't track it as a prompt and keep the tab "busy" waiting for a turn that never comes
-            send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", prompt, timeout=60))["send"]
-            await asyncio.sleep(0.3)
-            await orca("terminal", "send", "--terminal", o["handle"], "--text", "\r", timeout=30)
-        else:
-            send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", prompt, "--enter",
-                               "--wait-submit", "20", timeout=60))["send"]
-    except OrcaError as exc:
-        if "agent_prompt_blocked" not in str(exc):
-            raise
-        return {"reply": "", "session": o.get("session"), "waiting": True, "blocked": True}
-    if not send.get("accepted"):
-        raise OrcaError("Orca 탭이 메시지를 받지 않았습니다")
+    o["inflight"] = []  # anything left from an earlier, interrupted turn
+    if not prompt.startswith("/"):  # a /command gets no answer in the transcript, so nothing to wait for
+        o.setdefault("inflight", []).append(prompt)
+    await type_in(o["handle"], prompt)
     if prompt.startswith("/"):
         await asyncio.sleep(1.5)  # let the menu or command output draw before reading the screen
     return await collect(conv, on_step, timeout)
@@ -357,20 +369,19 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
 
 async def inject(conv: dict, text: str) -> bool:
     """Type a message into the tab while a turn runs; the CLI takes it in mid-turn (or right after),
-    and the running collect() follows until that is answered too. False if the tab refused it."""
+    and the running collect() follows until that is answered too. False while the tab shows a
+    choice or dialog, where typed text would pick options."""
     o = conv["orca"]
-    o.setdefault("inflight", []).append(text)
-    try:
-        send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", text, "--enter",
-                           timeout=60))["send"]
-    except OrcaError as exc:
-        o["inflight"].remove(text)
-        if "agent_prompt_blocked" in str(exc):
+    async with _typing.setdefault(o["handle"], asyncio.Lock()):  # taken first, so messages keep their order
+        if await waiting(o["handle"]):
             return False
-        raise
-    if not send.get("accepted"):
-        o["inflight"].remove(text)
-    return bool(send.get("accepted"))
+        o.setdefault("inflight", []).append(text)
+        try:
+            await _type(o["handle"], text)
+        except OrcaError:
+            o["inflight"].remove(text)
+            raise
+    return True
 
 
 async def press(conv: dict, key: str, on_step: Callable[[str], Awaitable[None]], timeout: int = 3600) -> dict:
