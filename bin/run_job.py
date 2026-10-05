@@ -69,9 +69,11 @@ CARDS_CONTRACT = """
 {"channel": "news", "title": "카드 제목", "theme": "ai 또는 finance", "emoji": "{{WEEKDAY_EMOJI}}",
  "items": [{"tag": "짧은 분류 2~6자", "headline": "기사 제목 40자 이내", "summary": "무슨 일인지 2문장, 110자 이내",
             "point_label": "왜 중요", "point": "한 문장 60자 이내", "source": "매체·기관 이름",
-            "url": "https://원문", "date": "24시간 넘은 기사만 MM/DD, 아니면 생략"}]}
+            "url": "https://원문", "image_url": "기사 대표 이미지 URL(선택)",
+            "date": "24시간 넘은 기사만 MM/DD, 아니면 생략"}]}
 ```
 - 항목은 최대 9개. 글자 수 제한을 지켜야 카드에서 잘리지 않습니다. 마크다운·이모지는 본문에 넣지 마세요.
+- 기사 대표 이미지 URL을 검색 결과에서 확인할 수 있으면 `image_url`에 넣으세요. 알 수 없으면 생략하세요. 시스템이 원문의 대표 이미지를 자동으로 찾아 카드에 넣습니다.
 - 보낼 것이 없으면 `"items": []`로 저장하세요.
 - 끝내기 전에 `python3 -m json.tool {{RUN_DIR}}/cards.json`으로 JSON이 올바른지 확인하세요.
 """

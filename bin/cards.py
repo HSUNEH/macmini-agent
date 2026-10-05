@@ -6,7 +6,12 @@
 Spec (written by the LLM; layout is ours so text is never garbled):
   {"channel": "news", "title": "오늘의 AI/Tech Top5", "theme": "ai" | "finance", "brand": "MY NEWS" (optional),
    "items": [{"tag": "보안", "headline": "...", "summary": "...", "point_label": "왜 중요",
-              "point": "...", "source": "연합뉴스", "url": "https://...", "date": "10/02 (optional)"}]}
+              "point": "...", "source": "연합뉴스", "url": "https://...", "image_url": "https://... (optional)",
+              "date": "10/02 (optional)"}]}
+
+Each story card uses the supplied representative image, or discovers the article's
+Open Graph image.  It also displays the publisher's favicon, so the visual source
+is clear even when an article does not expose a usable photo.
 """
 from __future__ import annotations
 
@@ -15,10 +20,13 @@ import json
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Dict, List
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
+from urllib.request import Request, urlopen
 
 CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 W, H = 1080, 1350
@@ -61,18 +69,25 @@ li .t { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertica
 </div></body></html>"""
 
 ITEM = """<!doctype html><html><head><meta charset="utf-8"><style>%(css)s
-.badge { margin-top: 64px; display: flex; gap: 20px; align-items: center; }
-.num { font-size: 120px; font-weight: 800; color: %(accent)s; line-height: 1; letter-spacing: -0.04em; }
-.tag { font-size: 32px; font-weight: 700; padding: 12px 26px; border-radius: 999px; background: %(soft)s; color: %(ink)s; }
+.badge { margin-top: 38px; display: flex; gap: 18px; align-items: center; }
+.num { font-size: 92px; font-weight: 800; color: %(accent)s; line-height: 1; letter-spacing: -0.04em; }
+.tag { font-size: 30px; font-weight: 700; padding: 11px 24px; border-radius: 999px; background: %(soft)s; color: %(ink)s; }
 .date { font-size: 30px; color: %(muted)s; font-weight: 600; }
-h2 { margin-top: 44px; font-size: 68px; line-height: 1.22; font-weight: 800; letter-spacing: -0.02em; max-height: 4.9em; }
-.summary { margin-top: 40px; font-size: 40px; line-height: 1.55; font-weight: 500; color: %(ink)s; opacity: 0.92; max-height: 7.8em; }
-.point { margin-top: 44px; background: %(soft)s; border-left: 10px solid %(accent)s; border-radius: 20px; padding: 32px 36px; }
-.point .label { font-size: 30px; font-weight: 800; color: %(accent)s; }
-.point .text { margin-top: 10px; font-size: 38px; line-height: 1.45; font-weight: 600; max-height: 4.35em; }
+.hero { position: relative; height: 270px; margin-top: 26px; overflow: hidden; border-radius: 26px; background: %(soft)s; }
+.hero > img { width: 100%%; height: 100%%; object-fit: cover; display: block; }
+.hero::after { content: ""; position: absolute; inset: 45%% 0 0; background: linear-gradient(transparent, rgba(0,0,0,.6)); }
+.hero-fallback { display: flex; align-items: flex-end; padding: 34px; font-size: 38px; font-weight: 800; color: %(muted)s; }
+.publisher { position: absolute; z-index: 1; left: 24px; bottom: 20px; display: flex; gap: 12px; align-items: center; font-size: 25px; font-weight: 700; color: white; text-shadow: 0 1px 4px rgba(0,0,0,.65); }
+.publisher img { width: 42px; height: 42px; border-radius: 12px; background: white; padding: 4px; object-fit: contain; }
+h2 { margin-top: 28px; font-size: 58px; line-height: 1.2; font-weight: 800; letter-spacing: -0.02em; max-height: 3.6em; }
+.summary { margin-top: 26px; font-size: 34px; line-height: 1.48; font-weight: 500; color: %(ink)s; opacity: 0.92; max-height: 4.45em; }
+.point { margin-top: 28px; background: %(soft)s; border-left: 9px solid %(accent)s; border-radius: 18px; padding: 24px 30px; }
+.point .label { font-size: 27px; font-weight: 800; color: %(accent)s; }
+.point .text { margin-top: 7px; font-size: 32px; line-height: 1.4; font-weight: 600; max-height: 2.8em; }
 </style></head><body><div class="page">
 <div class="top"><span class="brand">%(title)s</span><span>%(date_head)s</span></div>
 <div class="badge"><span class="num">%(n)02d</span><span class="tag">%(tag)s</span>%(item_date)s</div>
+%(hero)s
 <h2 class="fit">%(headline)s</h2>
 <div class="summary fit">%(summary)s</div>
 %(point)s
@@ -96,6 +111,100 @@ def domain(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+class MetaParser(HTMLParser):
+    """Tiny dependency-free Open Graph parser for article cover images."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.values: Dict[str, str] = {}
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag != "meta":
+            return
+        data = {str(k).lower(): str(v) for k, v in attrs if k and v}
+        key = (data.get("property") or data.get("name") or data.get("itemprop") or "").lower()
+        value = data.get("content", "").strip()
+        if key and value and key not in self.values:
+            self.values[key] = value
+
+
+def http_url(value: str) -> bool:
+    parsed = urlparse(value or "")
+    # Do not let card rendering load local files supplied by an LLM response.
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc) and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+
+
+def og_image(article_url: str) -> str:
+    """Return the first usable social-preview image advertised by an article."""
+    if not http_url(article_url):
+        return ""
+    try:
+        req = Request(article_url, headers={"User-Agent": "Mozilla/5.0 (compatible; macmini-agent/1.0)"})
+        with urlopen(req, timeout=8) as response:  # nosec B310 - URL was selected by the news job
+            if "html" not in response.headers.get_content_type():
+                return ""
+            raw = response.read(1_500_000)
+            charset = response.headers.get_content_charset() or "utf-8"
+        parser = MetaParser()
+        parser.feed(raw.decode(charset, errors="replace"))
+        for key in ("og:image:secure_url", "og:image", "twitter:image", "twitter:image:src"):
+            candidate = parser.values.get(key, "").strip()
+            if not candidate:
+                continue
+            image = urljoin(article_url, candidate)
+            if http_url(image):
+                return image
+    except Exception:
+        pass
+    return ""
+
+
+def download_image(image_url: str, target: Path) -> str:
+    """Download a bounded image for Chrome.  A local copy prevents hotlink surprises."""
+    if not http_url(image_url):
+        return ""
+    try:
+        req = Request(image_url, headers={"User-Agent": "Mozilla/5.0 (compatible; macmini-agent/1.0)"})
+        with urlopen(req, timeout=12) as response:  # nosec B310 - URL was selected by the news job
+            if not response.headers.get_content_type().startswith("image/"):
+                return ""
+            raw = response.read(6_000_001)
+        if not raw or len(raw) > 6_000_000:
+            return ""
+        target.write_bytes(raw)
+        return target.as_uri()
+    except Exception:
+        return ""
+
+
+def prepare_media(items: List[Dict], directory: Path) -> None:
+    """Add local cover-image URLs to items, without letting a failed fetch block a digest."""
+    directory.mkdir(parents=True, exist_ok=True)
+
+    def one(pair) -> None:
+        index, item = pair
+        image = str(item.get("image_url") or "").strip()
+        if not http_url(image):
+            image = og_image(str(item.get("url") or ""))
+        item["_image"] = download_image(image, directory / f"image-{index + 1}.img") if image else ""
+
+    with ThreadPoolExecutor(max_workers=min(4, max(len(items), 1))) as pool:
+        list(pool.map(one, enumerate(items)))
+
+
+def hero(item: Dict) -> str:
+    """The publisher favicon remains visible over both photos and the fallback tile."""
+    publisher = esc(item.get("source") or domain(item.get("url", "")))
+    host = domain(item.get("url", ""))
+    favicon = f"https://www.google.com/s2/favicons?domain={quote(host)}&sz=128" if host else ""
+    logo = f'<img src="{esc(favicon)}" alt="">' if favicon else ""
+    byline = f'<div class="publisher">{logo}<span>{publisher}</span></div>'
+    image = str(item.get("_image") or "")
+    if image:
+        return f'<div class="hero"><img src="{esc(image)}" alt="">{byline}</div>'
+    return f'<div class="hero hero-fallback"><span>{publisher}</span>{byline}</div>'
+
+
 def pages(spec: Dict) -> List[str]:
     theme = THEMES.get(spec.get("theme", "ai"), THEMES["ai"])
     css = BASE_CSS % dict(theme, W=W, H=H)
@@ -115,7 +224,7 @@ def pages(spec: Dict) -> List[str]:
         out.append(ITEM % dict(theme, css=css, title=esc(spec["title"]), date_head=f"{now:%m.%d}", n=i,
                                tag=esc(it.get("tag") or "뉴스"),
                                item_date=f'<span class="date">{esc(it["date"])} 발행</span>' if it.get("date") else "",
-                               headline=esc(it["headline"]), summary=esc(it.get("summary")), point=point,
+                               hero=hero(it), headline=esc(it["headline"]), summary=esc(it.get("summary")), point=point,
                                source=esc(it.get("source") or domain(it.get("url", ""))),
                                domain=esc(domain(it.get("url", ""))), page=i + 1, total=total))
     return out
@@ -127,6 +236,7 @@ def render(spec: Dict, out_dir: Path) -> List[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     with tempfile.TemporaryDirectory() as tmp:
+        prepare_media(spec["items"], Path(tmp) / "images")
         for i, page in enumerate(pages(spec)):
             src = Path(tmp) / f"card{i}.html"
             src.write_text(page, encoding="utf-8")
