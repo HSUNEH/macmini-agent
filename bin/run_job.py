@@ -14,6 +14,7 @@ followed by the prompt. Header keys:
   after     command run only after every message was posted
   notify    channel alias for engine=none output
   cards     true = the LLM writes RUN_DIR/cards.json and the job posts rendered card-news images
+  also_messages true = a card job also writes RUN_DIR/messages.json (for e.g. approval candidates)
 
 The LLM never sees the Discord token: it writes RUN_DIR/messages.json and this script posts it.
 """
@@ -69,13 +70,26 @@ CARDS_CONTRACT = """
 {"channel": "news", "title": "카드 제목", "theme": "ai 또는 finance", "emoji": "{{WEEKDAY_EMOJI}}",
  "items": [{"tag": "짧은 분류 2~6자", "headline": "기사 제목 40자 이내", "summary": "무슨 일인지 2문장, 110자 이내",
             "point_label": "왜 중요", "point": "한 문장 60자 이내", "source": "매체·기관 이름",
-            "url": "https://원문", "image_url": "기사 대표 이미지 URL(선택)",
+            "url": "https://원문(선택)", "image_url": "기사 대표 이미지 URL(선택)",
             "date": "24시간 넘은 기사만 MM/DD, 아니면 생략"}]}
 ```
 - 항목은 최대 9개. 글자 수 제한을 지켜야 카드에서 잘리지 않습니다. 마크다운·이모지는 본문에 넣지 마세요.
-- 기사 대표 이미지 URL을 검색 결과에서 확인할 수 있으면 `image_url`에 넣으세요. 알 수 없으면 생략하세요. 시스템이 원문의 대표 이미지를 자동으로 찾아 카드에 넣습니다.
+- 선택한 **모든** 기사에 `image_url`을 넣으세요. 먼저 해당 원문 검색 결과의 `thumbnail_url`을 그대로 쓰고, 없으면 기사 주제를 정확히 반영한 이미지 검색 결과 URL을 쓰세요. 원문의 홈페이지·매체 기본 이미지나 추측 URL은 쓰지 마세요. 정말 찾지 못한 경우에만 생략할 수 있으며, 그때는 시스템이 원문 대표 이미지를 자동으로 찾아 넣습니다.
 - 보낼 것이 없으면 `"items": []`로 저장하세요.
 - 끝내기 전에 `python3 -m json.tool {{RUN_DIR}}/cards.json`으로 JSON이 올바른지 확인하세요.
+"""
+
+
+CARDS_AND_MESSAGES_CONTRACT = CARDS_CONTRACT + """
+
+# 추가 텍스트 출력 규칙
+- 카드와 별도로 보낼 텍스트가 있으면 `{{RUN_DIR}}/messages.json`에 JSON 배열로 저장하세요.
+  `[{"channel": "<채널 별칭>", "content": "<본문>"}]`
+  - 선택 필드 `"react": "✅"`: 보낸 뒤 봇이 그 이모지를 답니다.
+  - 채널 별칭: {{CHANNELS}}
+- 별도 텍스트가 없으면 반드시 `[]`을 저장하세요. 카드 내용을 messages.json으로 중복해서 보내지 마세요.
+- content 하나는 1900자 이하로 쓰고, URL은 `<https://...>`처럼 꺾쇠로 감싸세요.
+- 끝내기 전에 `python3 -m json.tool {{RUN_DIR}}/messages.json`으로 JSON이 올바른지 확인하세요.
 """
 
 
@@ -266,7 +280,7 @@ def main() -> int:
                       f"- 상태 폴더 STATE_DIR: {state_dir}\n- 데이터 폴더 DATA_DIR: {data_dir}\n")
             if meta.get("pre"):
                 header += f"- 사전 수집 결과: {run_dir}/pre.json\n"
-            contract = CARDS_CONTRACT if meta.get("cards") else OUTPUT_CONTRACT
+            contract = (CARDS_AND_MESSAGES_CONTRACT if meta.get("also_messages") else CARDS_CONTRACT) if meta.get("cards") else OUTPUT_CONTRACT
             prompt = render(header + "\n" + body.strip() + "\n" + contract, ctx)
             (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
             if engine not in engines.ENGINES:
@@ -281,7 +295,12 @@ def main() -> int:
                 raise JobError(str(exc))
             if rc != 0:
                 raise JobError(f"{engine} 실패 (exit {rc}): {(err or out).strip()[-400:]}")
-            messages = card_messages(run_dir, note) if meta.get("cards") else load_messages(run_dir / "messages.json")
+            if meta.get("cards"):
+                messages = card_messages(run_dir, note)
+                if meta.get("also_messages"):
+                    messages += load_messages(run_dir / "messages.json")
+            else:
+                messages = load_messages(run_dir / "messages.json")
 
         note(f"messages: {len(messages)}")
         if args.dry_run:
