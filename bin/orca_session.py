@@ -234,6 +234,44 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
     engine, handle = o["engine"], o["handle"]
     progress = engines.ENGINES["claude"].progress if engine == "claude" else codex_progress
     lines: List[str] = []
+    state = {"last": "", "queued": 0}  # last prompt/answer seen, messages waiting in the CLI's queue
+
+    def track(line: str) -> None:
+        """Follow prompts and answers so the turn counts as done only when every message the bot
+        typed in (see inject) has been taken in and answered."""
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(ev, dict):
+            return
+        got = None
+        if engine == "claude":
+            kind = ev.get("type")
+            if kind == "queue-operation":
+                state["queued"] += 1 if ev.get("operation") == "enqueue" else -1
+                got = ev.get("content") if ev.get("operation") == "enqueue" else None
+            elif kind == "user" and isinstance((ev.get("message") or {}).get("content"), str):
+                got = ev["message"]["content"]
+                if not got.startswith("<"):  # <command-name>/<local-command-stdout>: a /command, no answer comes
+                    state["last"] = "user"
+            elif kind == "assistant":
+                state["last"] = "answer"
+            elif kind == "attachment" and (ev.get("attachment") or {}).get("type") == "queued_command":
+                got = ev["attachment"].get("prompt")
+        else:
+            p = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
+            if ev.get("type") == "response_item" and p.get("type") == "message" and p.get("role") == "user":
+                got = " ".join(c.get("text", "") for c in p.get("content") or [])
+                state["last"] = "user"
+            elif p.get("type") == "task_complete":
+                state["last"] = "answer"
+        if got:
+            inflight = o.get("inflight") or []
+            for i, text in enumerate(inflight):
+                if text.strip() and text.strip() in got:
+                    del inflight[i]
+                    break
 
     async def drain() -> None:
         if not o.get("path") and engine == "codex":
@@ -251,12 +289,13 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
         o["offset"] = o.get("offset", 0) + len(complete)
         for line in complete.decode("utf-8", "replace").splitlines():
             lines.append(line)
+            track(line)
             step = progress(line)
             if step:
                 await on_step(step)
 
+    stuck = 0.0
     while True:
-        seen = o.get("injected", 0)
         waiter = asyncio.ensure_future(orca("terminal", "wait", "--terminal", handle, "--for", "tui-idle",
                                             "--timeout-ms", str(timeout * 1000), timeout=timeout + 60))
         try:
@@ -268,9 +307,14 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
             waiter.cancel()
         await asyncio.sleep(0.5)
         await drain()
-        if o.get("injected", 0) == seen:
+        if wait.get("blockedReason") or not (o.get("inflight") or state["queued"] > 0 or state["last"] == "user"):
             break
-        await asyncio.sleep(POLL_SECONDS)  # a message typed in mid-turn may start one more turn: follow it too
+        # idle, but a message typed in mid-turn is still queued or unanswered: it starts one more turn
+        stuck += POLL_SECONDS
+        if stuck > 30 and not state["queued"] and state["last"] != "user":
+            o["inflight"] = []  # never showed up in the transcript (swallowed); stop waiting for it
+            break
+        await asyncio.sleep(POLL_SECONDS)
     if not wait.get("satisfied") and not wait.get("blockedReason"):
         raise OrcaError(f"{engine} 탭이 {timeout}초 안에 끝나지 않았습니다. Orca에서 확인해 주세요.")
     reply = claude_reply(lines) if engine == "claude" else codex_reply(lines)
@@ -292,14 +336,22 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
         return {"reply": "", "session": o.get("session"), "waiting": True, "blocked": True}
     mark(o)
     try:
-        send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", prompt, "--enter",
-                           "--wait-submit", "20", timeout=60))["send"]
+        if prompt.startswith("/"):  # a /command starts no turn: type it plus a plain Enter key, so Orca
+            # doesn't track it as a prompt and keep the tab "busy" waiting for a turn that never comes
+            send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", prompt, timeout=60))["send"]
+            await asyncio.sleep(0.3)
+            await orca("terminal", "send", "--terminal", o["handle"], "--text", "\r", timeout=30)
+        else:
+            send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", prompt, "--enter",
+                               "--wait-submit", "20", timeout=60))["send"]
     except OrcaError as exc:
         if "agent_prompt_blocked" not in str(exc):
             raise
         return {"reply": "", "session": o.get("session"), "waiting": True, "blocked": True}
     if not send.get("accepted"):
         raise OrcaError("Orca 탭이 메시지를 받지 않았습니다")
+    if prompt.startswith("/"):
+        await asyncio.sleep(1.5)  # let the menu or command output draw before reading the screen
     return await collect(conv, on_step, timeout)
 
 
@@ -307,14 +359,17 @@ async def inject(conv: dict, text: str) -> bool:
     """Type a message into the tab while a turn runs; the CLI takes it in mid-turn (or right after),
     and the running collect() follows until that is answered too. False if the tab refused it."""
     o = conv["orca"]
-    o["injected"] = o.get("injected", 0) + 1
+    o.setdefault("inflight", []).append(text)
     try:
         send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", text, "--enter",
                            timeout=60))["send"]
     except OrcaError as exc:
+        o["inflight"].remove(text)
         if "agent_prompt_blocked" in str(exc):
             return False
         raise
+    if not send.get("accepted"):
+        o["inflight"].remove(text)
     return bool(send.get("accepted"))
 
 
