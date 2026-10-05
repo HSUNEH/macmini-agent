@@ -466,13 +466,23 @@ async def on_message(msg: discord.Message) -> None:
 
 async def submit(target: discord.abc.Messageable, key: str, conv: dict, prompt: str,
                  msg: Optional[discord.Message] = None) -> None:
-    """Send a message, or queue it while the thread is busy; whatever piled up goes out together,
-    as one message, as soon as the running turn ends."""
-    pending.setdefault(key, []).append((prompt, msg))
+    """Send a message. While a turn runs in an Orca tab it is typed in right away, so the CLI sees it
+    mid-turn (📨); otherwise (headless, or the tab refused it) it is queued and whatever piled up
+    goes out together, as one message, as soon as the running turn ends (⏳)."""
     if locks.setdefault(key, asyncio.Lock()).locked():
+        if uses_orca(conv) and isinstance(running.get(key), tuple) and not pending.get(key):
+            try:
+                if await orca_session.inject(conv, prompt):
+                    if msg:
+                        await msg.add_reaction("📨")
+                    return
+            except orca_session.OrcaError:
+                pass
+        pending.setdefault(key, []).append((prompt, msg))
         if msg:
             await msg.add_reaction("⏳")
         return
+    pending.setdefault(key, []).append((prompt, msg))
     await flush(target, key, conv)
 
 

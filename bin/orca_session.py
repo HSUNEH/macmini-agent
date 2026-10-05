@@ -110,12 +110,9 @@ def codex_progress(line: str) -> Optional[str]:
 
 
 def codex_reply(lines: List[str]) -> str:
-    reply = ""
-    for line in lines:
-        p = _payload(line)
-        if p.get("type") == "task_complete":
-            reply = p.get("last_agent_message") or reply
-    return reply
+    """Final answers of the turns in these lines (several when a message was typed in mid-turn)."""
+    answers = [p.get("last_agent_message") for p in map(_payload, lines) if p.get("type") == "task_complete"]
+    return "\n\n".join(a for a in answers if a)
 
 
 def codex_rollout(session_id: str) -> Optional[Path]:
@@ -236,8 +233,6 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
     o = conv["orca"]
     engine, handle = o["engine"], o["handle"]
     progress = engines.ENGINES["claude"].progress if engine == "claude" else codex_progress
-    waiter = asyncio.ensure_future(orca("terminal", "wait", "--terminal", handle, "--for", "tui-idle",
-                                        "--timeout-ms", str(timeout * 1000), timeout=timeout + 60))
     lines: List[str] = []
 
     async def drain() -> None:
@@ -260,15 +255,22 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
             if step:
                 await on_step(step)
 
-    try:
-        while not waiter.done():
-            await drain()
-            await asyncio.sleep(POLL_SECONDS)
-        wait = waiter.result()["wait"]
-    finally:
-        waiter.cancel()
-    await asyncio.sleep(0.5)
-    await drain()
+    while True:
+        seen = o.get("injected", 0)
+        waiter = asyncio.ensure_future(orca("terminal", "wait", "--terminal", handle, "--for", "tui-idle",
+                                            "--timeout-ms", str(timeout * 1000), timeout=timeout + 60))
+        try:
+            while not waiter.done():
+                await drain()
+                await asyncio.sleep(POLL_SECONDS)
+            wait = waiter.result()["wait"]
+        finally:
+            waiter.cancel()
+        await asyncio.sleep(0.5)
+        await drain()
+        if o.get("injected", 0) == seen:
+            break
+        await asyncio.sleep(POLL_SECONDS)  # a message typed in mid-turn may start one more turn: follow it too
     if not wait.get("satisfied") and not wait.get("blockedReason"):
         raise OrcaError(f"{engine} 탭이 {timeout}초 안에 끝나지 않았습니다. Orca에서 확인해 주세요.")
     reply = claude_reply(lines) if engine == "claude" else codex_reply(lines)
@@ -299,6 +301,21 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
     if not send.get("accepted"):
         raise OrcaError("Orca 탭이 메시지를 받지 않았습니다")
     return await collect(conv, on_step, timeout)
+
+
+async def inject(conv: dict, text: str) -> bool:
+    """Type a message into the tab while a turn runs; the CLI takes it in mid-turn (or right after),
+    and the running collect() follows until that is answered too. False if the tab refused it."""
+    o = conv["orca"]
+    o["injected"] = o.get("injected", 0) + 1
+    try:
+        send = (await orca("terminal", "send", "--terminal", o["handle"], "--text", text, "--enter",
+                           timeout=60))["send"]
+    except OrcaError as exc:
+        if "agent_prompt_blocked" in str(exc):
+            return False
+        raise
+    return bool(send.get("accepted"))
 
 
 async def press(conv: dict, key: str, on_step: Callable[[str], Awaitable[None]], timeout: int = 3600) -> dict:
