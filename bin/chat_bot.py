@@ -490,13 +490,7 @@ async def flush(target: discord.abc.Messageable, key: str, conv: dict) -> None:
     """Send the queued messages; keep them if the tab is waiting on a choice (sent after it)."""
     while pending.get(key) and not locks.setdefault(key, asyncio.Lock()).locked():
         batch = pending.pop(key)
-        out = await ask(target, key, conv, "\n\n".join(text for text, _ in batch))
-        for _, m in batch:
-            if m:
-                try:
-                    await m.remove_reaction("⏳", client.user)
-                except discord.HTTPException:
-                    pass
+        out = await ask(target, key, conv, "\n\n".join(text for text, _ in batch), msgs=[m for _, m in batch if m])
         if out.get("blocked"):
             pending[key] = batch + pending.get(key, [])
             return
@@ -504,14 +498,32 @@ async def flush(target: discord.abc.Messageable, key: str, conv: dict) -> None:
             return
 
 
+async def mark(msgs: List[discord.Message], add: str, drop: Tuple[str, ...] = ()) -> None:
+    """Status reactions on the user's messages: ⏳ waiting, 🛠️ being worked on, ✅ done, ⚠️ failed."""
+    for m in msgs:
+        for emoji in drop:
+            try:
+                await m.remove_reaction(emoji, client.user)
+            except discord.HTTPException:
+                pass
+        try:
+            await m.add_reaction(add)
+        except discord.HTTPException:
+            pass
+
+
 async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str,
-              msg: Optional[discord.Message] = None, raw: bool = False, press: Optional[str] = None) -> dict:
+              msg: Optional[discord.Message] = None, raw: bool = False, press: Optional[str] = None,
+              msgs: Optional[List[discord.Message]] = None) -> dict:
     """Run one prompt in the conversation's engine session and post the reply. raw: send the text
-    to the tab as typed (a /command); press: type one key into the tab instead of a message."""
+    to the tab as typed (a /command); press: type one key into the tab instead of a message.
+    msgs: the user's messages this prompt carries, for status reactions."""
+    msgs = msgs if msgs is not None else ([msg] if msg else [])
     lock = locks.setdefault(key, asyncio.Lock())
-    if lock.locked() and msg:
-        await msg.add_reaction("⏳")  # queued behind the running task
+    if lock.locked():
+        await mark(msgs, "⏳")  # queued behind the running task
     async with lock:
+        await mark(msgs, "🛠️", drop=("⏳",))
         engine = conv["engine"]
         sid = conv.setdefault("sessions", {}).get(engine)
         full = prompt if raw or press else carryover(conv, engine) + prompt
@@ -540,6 +552,7 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
             await status.finish(False)
             hint = " 세션이 꼬였으면 `!new`로 새로 시작하세요." if sid and "!stop" not in str(exc) else ""
             await target.send(f"⚠️ {str(exc)[:1500]}{hint}")
+            await mark(msgs, "⚠️", drop=("🛠️",))
             return {"error": True}
         await status.finish(True)
         reply_text, handoff = take_handoff(reply_text, conv)
@@ -566,6 +579,8 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
         if handoff:
             await target.send(f"🔎 `{handoff[0]}` 프로젝트로 감지됐어요! 새 세션으로 이어서 작업할까요?\n> {handoff[1][:300]}",
                               view=HandoffView(handoff[0]), allowed_mentions=discord.AllowedMentions.none())
+        # blocked: not typed in (the tab waits on a choice); it stays queued and goes out after it
+        await mark(msgs, "⏳" if out.get("blocked") else "✅", drop=("🛠️",))
         return out
 
 
