@@ -183,6 +183,9 @@ async def ensure_tab(conv: dict, title: str, system_prompt: str) -> dict:
     if not o.get("session") and conv.get("sessions", {}).get(engine):
         o["session"] = conv["sessions"][engine]  # resume the thread's earlier session for this engine
     if o.get("handle") and await alive(o["handle"], engine):
+        if not o.get("path") and o.get("session"):  # a tab opened by an older version of the bot
+            path = claude_transcript(workdir, o["session"]) if engine == "claude" else codex_rollout(o["session"])
+            o["path"] = str(path) if path else None
         return o
     o["resume"] = bool(o.get("session"))
     if engine == "claude":
