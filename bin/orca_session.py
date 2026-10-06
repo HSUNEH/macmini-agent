@@ -25,7 +25,7 @@ import engines
 
 ORCA = "/Applications/Orca.app/Contents/Resources/bin/orca"
 READY_TIMEOUT_MS = 90_000
-POLL_SECONDS = 1.5
+POLL_SECONDS = 0.5  # transcript polling: reads only what was appended, so it is cheap
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 # Discord key buttons -> bytes typed into the tab
@@ -282,6 +282,8 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
                     state["last"] = "user"
             elif kind == "assistant":
                 state["last"] = "answer"
+            elif kind == "system" and ev.get("subtype") == "turn_duration":
+                state["last"] = "done"  # written right after the turn's final message
             elif kind == "attachment" and (ev.get("attachment") or {}).get("type") == "queued_command":
                 got = ev["attachment"].get("prompt")
         else:
@@ -290,7 +292,7 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
                 got = " ".join(c.get("text", "") for c in p.get("content") or [])
                 state["last"] = "user"
             elif p.get("type") == "task_complete":
-                state["last"] = "answer"
+                state["last"] = "done"
         if got:
             inflight = o.get("inflight") or []
             for i, text in enumerate(inflight):
@@ -319,7 +321,7 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
             if step:
                 await on_step(step)
 
-    stuck = 0.0
+    stuck_since = None
     while True:
         waiter = asyncio.ensure_future(orca("terminal", "wait", "--terminal", handle, "--for", "tui-idle",
                                             "--timeout-ms", str(timeout * 1000), timeout=timeout + 60))
@@ -327,8 +329,9 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
             wait = None
             while not waiter.done():
                 await drain()
-                # codex marks the end of a turn (task_complete); its tab takes ~10s more to look idle
-                if engine == "codex" and state["last"] == "answer" and not o.get("inflight") and state["queued"] <= 0:
+                # the transcript marks the end of a turn (claude turn_duration, codex task_complete), well
+                # before the tab looks idle to Orca (codex ~10s later): finish on that
+                if state["last"] == "done" and not o.get("inflight") and state["queued"] <= 0:
                     wait = {"satisfied": True}
                     break
                 await asyncio.sleep(POLL_SECONDS)
@@ -340,8 +343,8 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
         if wait.get("blockedReason") or not (o.get("inflight") or state["queued"] > 0 or state["last"] == "user"):
             break
         # idle, but a message typed in mid-turn is still queued or unanswered: it starts one more turn
-        stuck += POLL_SECONDS
-        if stuck > 30 and not state["queued"] and state["last"] != "user":
+        stuck_since = stuck_since or time.time()
+        if time.time() - stuck_since > 30 and not state["queued"] and state["last"] != "user":
             o["inflight"] = []  # never showed up in the transcript (swallowed); stop waiting for it
             break
         await asyncio.sleep(POLL_SECONDS)
