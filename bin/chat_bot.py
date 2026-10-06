@@ -161,21 +161,64 @@ def uses_orca(conv: dict) -> bool:
     return USE_ORCA
 
 
+OPTION = re.compile(r"^\s*([❯›>])?\s*([1-9])\.\s+(.+?)\s*$")
+RULE = re.compile(r"─{10,}")
+
+
+def dialog_part(screen: str) -> str:
+    """Just the choice/menu from a tab screen: from the rule above it to its key hints, without the
+    conversation above, the rules, and descriptions that only repeat an option's label."""
+    lines = screen.splitlines()
+    first = max((i for i, line in enumerate(lines) if OPTION.match(line) and OPTION.match(line).group(2) == "1"), default=None)
+    if first is not None:  # numbered choices: up to 3 lines of title/question above option 1
+        start = first
+        while start > 0 and first - start < 3 and not RULE.search(lines[start - 1]) and lines[start - 1].strip():
+            start -= 1
+    else:  # an unnumbered menu (/mcp ...): from the last rule above its key hints
+        hint = max((i for i, line in enumerate(lines) if re.search(r"\b[Ee]sc\b", line)), default=len(lines) - 1)
+        rules = [i for i in range(max(0, hint - 30), hint) if RULE.search(lines[i])]
+        start = rules[-1] + 1 if rules else max(0, hint - 15)
+    out, label = [], None
+    for line in lines[start:]:
+        if RULE.search(line) or not line.strip() or line.strip() == "─" * len(line.strip()):
+            continue
+        m = OPTION.match(line)
+        if m:
+            label = re.sub(r"^\[.\]\s*", "", m.group(3)).strip()
+        elif label and line.strip() == label:
+            continue  # description that only repeats the label
+        out.append(line.rstrip())
+    return "\n".join(out)
+
+
+def dialog_options(part: str) -> List[Tuple[str, str, bool]]:
+    """(number, label, is the cursor on it) for each numbered option, checkbox state kept as ☐/☑."""
+    opts = []
+    for line in part.splitlines():
+        m = OPTION.match(line)
+        if m:
+            label = re.split(r"\s{2,}", m.group(3))[0]
+            label = label.replace("[ ]", "☐").replace("[✔]", "☑").replace("[x]", "☑")
+            opts.append((m.group(2), label[:40], bool(m.group(1))))
+    return opts
+
+
 class KeysView(discord.ui.View):
-    """Key buttons under a tab screen. Clicks are handled in on_interaction by custom_id ("key:<name>")."""
-    LABELS = [("up", "↑"), ("down", "↓"), ("enter", "⏎ Enter"), ("esc", "Esc"), ("screen", "🔄"),
-              ("1", "1"), ("2", "2"), ("3", "3"), ("4", "4"), ("stab", "⇧Tab")]
+    """Buttons under a tab screen: one per numbered option, then navigation and action keys.
+    Clicks are handled in on_interaction by custom_id ("key:<name>")."""
+    NAV = [("up", "↑"), ("down", "↓"), ("left", "←"), ("right", "→"), ("space", "Space")]
+    ACT = [("enter", "⏎ Enter"), ("esc", "Esc"), ("stab", "⇧Tab"), ("screen", "🔄")]
 
-    def __init__(self):
+    def __init__(self, options: List[Tuple[str, str, bool]] = ()):
         super().__init__(timeout=None)
-        for i, (name, label) in enumerate(self.LABELS):
-            self.add_item(discord.ui.Button(label=label, custom_id=f"key:{name}", row=i // 5,
-                                            style=discord.ButtonStyle.primary if name == "enter" else discord.ButtonStyle.secondary))
-
-
-def screen_text(screen: str) -> str:
-    body = screen.replace("```", "ˋˋˋ")[-1800:]
-    return f"🖥️ 탭 화면 · 버튼으로 키를 보내거나, 메시지를 쓰면 그대로 입력됩니다\n```\n{body or ' '}\n```"
+        for i, (num, label, current) in enumerate(list(options)[:10]):
+            self.add_item(discord.ui.Button(label=f"{num}. {label}", custom_id=f"key:{num}", row=i // 5,
+                                            style=discord.ButtonStyle.primary if current else discord.ButtonStyle.secondary))
+        base = 2 if len(options) > 5 else (1 if options else 0)
+        for row, keys in ((base, self.NAV), (base + 1, self.ACT)):
+            for name, label in keys:
+                self.add_item(discord.ui.Button(label=label, custom_id=f"key:{name}", row=row,
+                                                style=discord.ButtonStyle.success if name == "enter" else discord.ButtonStyle.secondary))
 
 
 async def post_screen(target: discord.abc.Messageable, conv: dict) -> None:
@@ -183,8 +226,10 @@ async def post_screen(target: discord.abc.Messageable, conv: dict) -> None:
     if not handle:
         await target.send("열린 Orca 탭이 없습니다. 메시지를 보내면 탭이 열립니다.")
         return
-    await target.send(screen_text(await orca_session.screen(handle)), view=KeysView(),
-                      allowed_mentions=discord.AllowedMentions.none())
+    part = dialog_part(await orca_session.screen(handle))
+    body = part.replace("```", "ˋˋˋ")[-1800:]
+    await target.send(f"🖥️ 선택 화면 (버튼으로 고르거나, 메시지를 쓰면 그대로 입력)\n```\n{body or ' '}\n```",
+                      view=KeysView(dialog_options(part)), allowed_mentions=discord.AllowedMentions.none())
 
 
 def clip(text: str) -> str:

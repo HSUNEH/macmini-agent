@@ -29,8 +29,12 @@ POLL_SECONDS = 1.5
 CODEX_SESSIONS = Path.home() / ".codex" / "sessions"
 CODEX_CONFIG = Path.home() / ".codex" / "config.toml"
 # Discord key buttons -> bytes typed into the tab
-KEYS = {"up": "\x1b[A", "down": "\x1b[B", "enter": "\r", "esc": "\x1b", "tab": "\t", "stab": "\x1b[Z",
-        "1": "1", "2": "2", "3": "3", "4": "4"}
+KEYS = {"up": "\x1b[A", "down": "\x1b[B", "left": "\x1b[D", "right": "\x1b[C", "enter": "\r", "esc": "\x1b",
+        "space": " ", "tab": "\t", "stab": "\x1b[Z", **{str(n): str(n) for n in range(1, 10)}}
+
+
+# key hints under a menu or choice ("esc to interrupt" while working is not one)
+MENU_HINT = re.compile(r"(?i)esc to (cancel|close|exit|go back)|esc back|enter to (select|confirm)|enter select")
 
 
 class OrcaError(Exception):
@@ -366,8 +370,56 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
         o.setdefault("inflight", []).append(prompt)
     await type_in(o["handle"], prompt)
     if prompt.startswith("/"):
-        await asyncio.sleep(1.5)  # let the menu or command output draw before reading the screen
+        return await settle_command(conv, timeout)
     return await collect(conv, on_step, timeout)
+
+
+async def settle_command(conv: dict, timeout: int) -> dict:
+    """After a /command: done as soon as a menu shows its key hints (codex menus never look idle to
+    Orca) or the tab is idle again (e.g. /compact finished); after `timeout`, show what is there."""
+    o, start = conv["orca"], time.time()
+    while time.time() - start < timeout:
+        await asyncio.sleep(1.0)
+        tail = (await screen(o["handle"])).splitlines()[-6:]
+        if any(MENU_HINT.search(line) for line in tail):
+            return {"reply": "", "session": o.get("session"), "waiting": True}
+        try:
+            wait = (await orca("terminal", "wait", "--terminal", o["handle"], "--for", "tui-idle",
+                               "--timeout-ms", "1000", timeout=30))["wait"]
+        except OrcaError:
+            continue
+        if wait.get("satisfied"):
+            out = ""
+            for _ in range(6):  # its output reaches the transcript a moment after the tab goes idle
+                out = command_output(o)
+                if out:
+                    break
+                await asyncio.sleep(0.5)
+            return {"reply": out, "session": o.get("session"), "waiting": await waiting(o["handle"])}
+    return {"reply": "", "session": o.get("session"), "waiting": True}
+
+
+def command_output(o: dict) -> str:
+    """What a /command printed (claude records it as <local-command-stdout>), e.g. "Compacted"."""
+    path = Path(o["path"]) if o.get("path") else None
+    if not path or not path.exists():
+        return ""
+    with path.open("rb") as f:
+        f.seek(o.get("offset", 0))
+        lines = f.read().decode("utf-8", "replace").splitlines()
+    outs = []
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        content = ev.get("content") if ev.get("type") == "system" else (ev.get("message") or {}).get("content")
+        if isinstance(content, str):
+            for chunk in re.findall(r"<local-command-stdout>(.*?)</local-command-stdout>", content, re.S):
+                first = next((ln.strip() for ln in re.sub(r"\x1b\[[0-9;]*m", "", chunk).splitlines() if ln.strip()), "")
+                if first:  # only the first line: hooks (e.g. PostCompact) append long command dumps
+                    outs.append(first)
+    return "\n".join(outs)[:500]
 
 
 async def inject(conv: dict, text: str) -> bool:
