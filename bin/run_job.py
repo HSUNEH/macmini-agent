@@ -89,6 +89,7 @@ CARDS_AND_MESSAGES_CONTRACT = CARDS_CONTRACT + """
   - 채널 별칭: {{CHANNELS}}
 - 별도 텍스트가 없으면 반드시 `[]`을 저장하세요. 카드 내용을 messages.json으로 중복해서 보내지 마세요.
 - content 하나는 1900자 이하로 쓰고, URL은 `<https://...>`처럼 꺾쇠로 감싸세요.
+- 메시지 하나에 카드 이미지를 붙이려면 선택 필드 `"card"`에 cards.json과 같은 객체를 넣으세요. 이 카드는 해당 메시지의 첨부 이미지로 렌더링됩니다.
 - 끝내기 전에 `python3 -m json.tool {{RUN_DIR}}/messages.json`으로 JSON이 올바른지 확인하세요.
 """
 
@@ -114,6 +115,37 @@ def card_messages(run_dir: Path, note) -> List[Dict]:
         return [{"channel": channel, "content": cards.text_fallback(spec)}]
     return [{"channel": channel, "content": "", "files": [str(p) for p in pngs]},
             {"channel": channel, "content": cards.links_text(spec)}]
+
+
+def render_message_cards(run_dir: Path, messages: List[Dict], note) -> List[Dict]:
+    """Render an optional `card` spec attached to an ordinary message.
+
+    This keeps actionable messages (such as Discord reactions used for approval)
+    while presenting their contents in the same card format as scheduled news.
+    """
+    for index, msg in enumerate(messages, 1):
+        raw_spec = msg.pop("card", None)
+        if raw_spec is None:
+            continue
+        if not isinstance(raw_spec, dict):
+            raise JobError(f"messages.json[{index - 1}].card가 객체가 아닙니다")
+        if msg.get("files"):
+            raise JobError(f"messages.json[{index - 1}]는 card와 files를 함께 쓸 수 없습니다")
+        spec = dict(raw_spec)
+        spec.setdefault("channel", str(msg["channel"]))
+        spec.setdefault("brand", CONFIG.get("cards", {}).get("brand", "DAILY NEWS"))
+        try:
+            cards.validate(spec)
+        except ValueError as exc:
+            raise JobError(f"messages.json[{index - 1}].card 오류: {exc}")
+        if not spec["items"]:
+            continue
+        try:
+            pngs = cards.render(spec, run_dir / "message-cards" / f"{index:02d}")
+            msg["files"] = [str(p) for p in pngs]
+        except Exception as exc:  # the actionable text is still more useful than failing the whole job
+            note(f"message card render failed, sending text instead: {exc}")
+    return messages
 
 
 class JobError(Exception):
@@ -301,6 +333,7 @@ def main() -> int:
                     messages += load_messages(run_dir / "messages.json")
             else:
                 messages = load_messages(run_dir / "messages.json")
+            messages = render_message_cards(run_dir, messages, note)
 
         note(f"messages: {len(messages)}")
         if args.dry_run:

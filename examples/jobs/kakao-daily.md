@@ -24,5 +24,5 @@ also_messages: true
 
 # 카드와 후보 메시지
 1) digest 카드뉴스용 cards.json 1개: channel은 `digest`, title은 `오늘의 카카오 AI방 요약`, theme은 `ai`, emoji는 `🗨️`입니다. 핵심 이슈·유용한 Q&A·실전 사용법을 3~7개 카드 항목으로 정리합니다. tag는 짧은 분류, source는 카카오방 이름, url은 공식 원문이 있을 때만 넣으세요. 개인 이름은 넣지 마세요.
-2) messages.json에는 candidates 채널의 후보 메시지만 넣고, 각각 `"react": "✅"`. 첫 줄은 `CANDIDATE ✅ 후보 N — {{TODAY}}`로 시작하고 이름, 저장 이유, 핵심 포인트, 메인 링크를 적습니다.
+2) messages.json에는 candidates 채널의 후보 메시지만 넣습니다. 각 후보에 `"react": "✅"`와 `"card"`를 붙이세요. card는 제목 `ai_info 후보`, theme `ai`, emoji `✅`, items 1개이며 headline은 후보 이름, tag는 카테고리, summary는 저장 이유·핵심 포인트, point_label은 `언제 쓰나`, point는 실사용처, source는 출처 방, url은 메인 링크입니다. 본문 첫 줄은 `CANDIDATE ✅ 후보 N — {{TODAY}}`로 시작하고 이름, 저장 이유, 핵심 포인트, 메인 링크를 적습니다.
 후보가 없으면 messages.json에 `[]`을 쓰고 카드 내용을 텍스트로 중복 발송하지 마세요.

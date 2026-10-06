@@ -119,6 +119,7 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 ```
 
 출력 규칙(보낼 메시지를 `messages.json`/`cards.json`에 쓰는 법)은 `run_job.py`가 프롬프트 끝에 자동으로 붙입니다.
+`also_messages: true`인 카드 작업은 messages.json 항목에 `card` 객체를 넣어, 승인 반응 등이 필요한 개별 메시지에도 카드 이미지를 붙일 수 있습니다.
 새 작업을 추가하거나 시각을 바꾸면 `./deploy.sh`만 하면 됩니다.
 
 ## Discord 명령
