@@ -388,7 +388,7 @@ async def on_message(msg: discord.Message) -> None:
         return
     text = msg.content.strip()
     target = msg.channel
-    m = re.match(r"^!(\w[\w-]*)\s*(.*)$", text, re.S)
+    m = re.match(r"^!\s*(\w[\w-]*)\s*(.*)$", text, re.S)  # "! codex" too: a leading "!" never reaches a tab (shell mode)
     if not isinstance(msg.channel, (discord.Thread, discord.DMChannel)):  # new topic -> its own thread
         title = (text.splitlines()[0] if text else "대화")[:80] or "대화"
         if m and m.group(1).lower() in PROJECTS:
@@ -500,6 +500,9 @@ async def on_message(msg: discord.Message) -> None:
                 return
             text = rest
 
+    if text.startswith("!"):  # not a command we know ("!" alone, "!!" ...): in a CLI tab it would run a shell command
+        await target.send("`!`로 시작하는 메시지는 탭에 넣지 않아요(셸 명령이 돼요). `!help`로 명령을 보세요.")
+        return
     if uses_orca(conv) and text.startswith("/") and not msg.attachments:  # a CLI command (/mcp, /compact, ...)
         await ask(target, key, conv, text, msg, raw=True)
         await flush(target, key, conv)
