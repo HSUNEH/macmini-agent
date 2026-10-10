@@ -205,6 +205,24 @@ def dialog_options(part: str) -> List[Tuple[str, str, bool]]:
     return opts
 
 
+def choice_question(part: str) -> str:
+    """Keep the question, without terminal chrome or a duplicate list of options."""
+    lines = part.splitlines()
+    first = next((i for i, line in enumerate(lines) if OPTION.match(line)), len(lines))
+    headers = [line.strip() for line in lines[:first]
+               if line.strip() and not orca_session.DONE_ON_SCREEN.search(line)
+               and not orca_session.MENU_HINT.search(line) and not RULE.search(line)]
+    question = headers[-1] if headers else "항목을 선택해주세요."
+    reasoning = re.search(r"(?i)Select Reasoning Level for (.+)", question)
+    if reasoning:
+        return f"{reasoning.group(1)}의 추론 강도를 선택해주세요."
+    if re.search(r"(?i)select model", question):
+        return "사용할 모델을 선택해주세요."
+    if re.search(r"(?i)(?:implement|execute) (?:this|the) plan", question):
+        return "이 플랜을 실행할까요?"
+    return question[:1000]
+
+
 class KeysView(discord.ui.View):
     """Compact Discord controls for an actual CLI choice screen.
 
@@ -253,12 +271,11 @@ async def post_screen(target: discord.abc.Messageable, conv: dict) -> None:
         await target.send(f"🖥️ 현재 탭 화면\n```\n{body or ' '}\n```", allowed_mentions=discord.AllowedMentions.none())
         return
     part = dialog_part(screen)
-    body = part.replace("```", "ˋˋˋ")[-1800:]
     engine = "Codex" if conv.get("engine") == "codex" else "Claude"
     multi = any("☐" in label or "☑" in label for _, label, _ in dialog_options(part))
     guide = "여러 항목을 고른 뒤 ‘완료’를 누르세요." if multi else "아래 버튼으로 골라주세요."
     embed = discord.Embed(title=f"{engine} 선택이 필요해요", colour=discord.Colour.blurple(),
-                          description=f"{guide}\n```\n{body or ' '}\n```")
+                          description=f"{choice_question(part)}\n\n{guide}")
     embed.set_footer(text="다음 질문이 나오면 다시 선택을 기다립니다 · 취소로 메뉴 닫기")
     options = dialog_options(part)
     message = await target.send(embed=embed, view=KeysView(options, part), allowed_mentions=discord.AllowedMentions.none())
