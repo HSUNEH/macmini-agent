@@ -34,7 +34,7 @@ KEYS = {"up": "\x1b[A", "down": "\x1b[B", "left": "\x1b[D", "right": "\x1b[C", "
 
 
 # key hints under a menu or choice ("esc to interrupt" while working is not one)
-MENU_HINT = re.compile(r"(?i)esc to (cancel|close|exit|go back)|esc back|enter to (select|confirm)|enter select")
+MENU_HINT = re.compile(r"(?i)esc(?: to)? (?:cancel|close|exit|go back|back|dismiss)|enter(?: to)? (?:select|confirm|submit|continue)")
 MODEL_CHANGED = re.compile(r"(?i)\bmodel changed to\s+(.+?)\s*$")
 
 
@@ -274,9 +274,11 @@ async def waiting(handle: str) -> bool:
         t = (await orca("terminal", "show", "--terminal", handle, timeout=30))["terminal"]
     except OrcaError:
         return False
-    if not t.get("agentWait"):
+    if not t.get("connected") or t.get("orphaned"):
         return False
-    return bool(MENU_HINT.search(await screen(handle)))
+    # Hints from earlier menus in scrollback must not turn an ordinary prompt
+    # into a choice. Some Codex versions also omit agentWait for real menus.
+    return bool(MENU_HINT.search("\n".join((await screen(handle)).splitlines()[-8:])))
 
 
 def mark(o: dict) -> None:

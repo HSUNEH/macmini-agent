@@ -213,7 +213,7 @@ class KeysView(discord.ui.View):
     it. The old all-purpose arrow-key keypad is intentionally omitted.
     """
 
-    def __init__(self, options: List[Tuple[str, str, bool]] = ()):
+    def __init__(self, options: List[Tuple[str, str, bool]] = (), hints: str = ""):
         super().__init__(timeout=None)
         choices = list(options)[:25]
         multi = any("☐" in label or "☑" in label for _, label, _ in choices)
@@ -221,7 +221,7 @@ class KeysView(discord.ui.View):
         # readable on Discord mobile when Codex lists many models.
         if 10 < len(choices):
             self.add_item(discord.ui.Select(
-                custom_id="pickmenu", placeholder="항목을 고르면 바로 적용합니다", min_values=1, max_values=1,
+                custom_id="pickmenu", placeholder="항목을 선택하세요", min_values=1, max_values=1,
                 options=[discord.SelectOption(label=f"{num}. {label}"[:100], value=str(i), default=current)
                          for i, (num, label, current) in enumerate(choices)], row=0))
             base = 1
@@ -235,6 +235,8 @@ class KeysView(discord.ui.View):
             controls = [("enter", "완료"), *controls]
         elif not choices:
             controls = [("enter", "확인"), *controls]
+        if re.search(r"(?i)\btab\b", hints):
+            controls.extend([("stab", "이전 질문"), ("tab", "다음 질문")])
         for name, label in controls:
             self.add_item(discord.ui.Button(label=label, custom_id=f"key:{name}", row=base,
                                             style=discord.ButtonStyle.success if name == "enter" else discord.ButtonStyle.secondary))
@@ -253,11 +255,13 @@ async def post_screen(target: discord.abc.Messageable, conv: dict) -> None:
     part = dialog_part(screen)
     body = part.replace("```", "ˋˋˋ")[-1800:]
     engine = "Codex" if conv.get("engine") == "codex" else "Claude"
-    embed = discord.Embed(title=f"{engine} 선택", colour=discord.Colour.blurple(),
-                          description=f"아래 항목을 누르면 바로 적용합니다.\n```\n{body or ' '}\n```")
-    embed.set_footer(text="취소 · 현재 메뉴 닫기   |   새로고침 · 화면 다시 읽기")
+    multi = any("☐" in label or "☑" in label for _, label, _ in dialog_options(part))
+    guide = "여러 항목을 고른 뒤 ‘완료’를 누르세요." if multi else "아래 버튼으로 골라주세요."
+    embed = discord.Embed(title=f"{engine} 선택이 필요해요", colour=discord.Colour.blurple(),
+                          description=f"{guide}\n```\n{body or ' '}\n```")
+    embed.set_footer(text="다음 질문이 나오면 다시 선택을 기다립니다 · 취소로 메뉴 닫기")
     options = dialog_options(part)
-    message = await target.send(embed=embed, view=KeysView(options), allowed_mentions=discord.AllowedMentions.none())
+    message = await target.send(embed=embed, view=KeysView(options, part), allowed_mentions=discord.AllowedMentions.none())
     conv["choice"] = {"message": message.id, "handle": handle,
                       "options": [(num, label) for num, label, _ in options]}
     save_sessions()
@@ -850,6 +854,8 @@ async def on_key(inter: discord.Interaction, name: str) -> None:
     if not handle or (name != "screen" and name not in orca_session.KEYS):
         await inter.response.send_message("열린 Orca 탭이 없습니다.", ephemeral=True)
         return
+    if name != "screen":
+        conv.pop("choice", None)
     await inter.response.edit_message(view=None)  # this screen is now stale; a fresh one follows
     if name == "screen":
         await post_screen(target, conv)
@@ -884,6 +890,7 @@ async def on_pick(inter: discord.Interaction, index: int) -> None:
     multi = "☐" in label or "☑" in label
     moves = (["down"] * (index - current) if index >= current else ["up"] * (current - index))
     moves.append("space" if multi else "enter")
+    conv.pop("choice", None)
     await inter.response.edit_message(view=None)
     out = await ask(target, key, conv, "", press=moves)
     if not out.get("waiting"):
