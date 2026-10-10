@@ -153,7 +153,8 @@ def tab_command(engine: str, o: dict, title: str, system_prompt: str, effort: Op
                o["session"], "--name", title]
         cmd += ["--effort", effort] if effort else []
         return cmd + (["--append-system-prompt", system_prompt] if system_prompt else [])
-    cmd = ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+    # No self-update on start: it installs, then exits and leaves the tab a bare shell.
+    cmd = ["codex", "--dangerously-bypass-approvals-and-sandbox", "-c", "check_for_update_on_startup=false"]
     cmd += ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
     cmd += ["-c", f"developer_instructions={json.dumps(system_prompt, ensure_ascii=False)}"] if system_prompt else []
     return cmd + (["resume", o["session"]] if o.get("session") else [])
@@ -225,8 +226,25 @@ async def ensure_tab(conv: dict, title: str, system_prompt: str) -> dict:
                        "--timeout-ms", str(READY_TIMEOUT_MS), timeout=READY_TIMEOUT_MS / 1000 + 30))["wait"]
     if not wait.get("satisfied") and not wait.get("blockedReason"):  # a dialog on start shows up as a screen
         raise OrcaError(f"Orca의 {engine} 탭이 준비되지 않았습니다 ({wait.get('status')})")
+    await answer_start_dialogs(t["handle"])
     await asyncio.sleep(1.0)  # a just-started CLI can drop keys typed the moment it reports idle
     return o
+
+
+# Start-up questions the bot answers itself, so a message never waits behind a screen nobody sees:
+# codex resuming a session recorded in another folder -> stay in the thread's folder (option 2).
+START_DIALOGS = [(re.compile(r"Working directory · resume"), "2")]
+
+
+async def answer_start_dialogs(handle: str) -> None:
+    for _ in range(3):
+        text = "\n".join((await screen(handle)).splitlines()[-15:])
+        key = next((k for pat, k in START_DIALOGS if pat.search(text)), None)
+        if key is None:
+            return
+        await orca("terminal", "send", "--terminal", handle, "--text", key, timeout=30)
+        await orca("terminal", "wait", "--terminal", handle, "--for", "tui-idle",
+                   "--timeout-ms", "20000", timeout=50)
 
 
 _typing: Dict[str, asyncio.Lock] = {}  # one typist per tab, so concurrent messages don't interleave
