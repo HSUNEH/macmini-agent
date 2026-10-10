@@ -213,6 +213,10 @@ async def ensure_tab(conv: dict, title: str, system_prompt: str) -> dict:
         path = codex_rollout(o["session"]) if o.get("session") else None
         o["path"] = str(path) if path else None
     o["opened"] = time.time()
+    # The first prompt in a just-created tab is the one most likely to be
+    # dropped while the TUI finishes attaching.  Send that prompt through
+    # Orca's acknowledged submit path (rather than raw keys) below.
+    o["fresh"] = True
     cmd = tab_command(engine, o, title, system_prompt, conv.get("effort"))
     t = (await orca("terminal", "create", "--worktree", f"path:{workdir}", "--title", title,
                     "--command", " ".join(shlex.quote(c) for c in cmd)))["terminal"]
@@ -228,15 +232,23 @@ async def ensure_tab(conv: dict, title: str, system_prompt: str) -> dict:
 _typing: Dict[str, asyncio.Lock] = {}  # one typist per tab, so concurrent messages don't interleave
 
 
-async def type_in(handle: str, text: str) -> None:
+async def type_in(handle: str, text: str, *, confirm_submit: bool = False) -> None:
     """Type text and press Enter as raw keys. `orca terminal send --enter` is much slower (it watches
     for the turn to start before returning, ~8s, and handles one send at a time); a short pause
     before Enter keeps codex from taking a fast paste's Enter as a newline."""
     async with _typing.setdefault(handle, asyncio.Lock()):
-        await _type(handle, text)
+        await _type(handle, text, confirm_submit=confirm_submit)
 
 
-async def _type(handle: str, text: str) -> None:
+async def _type(handle: str, text: str, *, confirm_submit: bool = False) -> None:
+    if confirm_submit:
+        # `--enter` waits until Orca has accepted the prompt.  It is slower
+        # than raw keys, so reserve it for the first message in a new tab.
+        sent = await orca("terminal", "send", "--terminal", handle, "--text", text,
+                          "--enter", "--wait-submit", "20", timeout=60)
+        if not sent.get("send", {}).get("accepted"):
+            raise OrcaError("Orca 탭이 첫 메시지를 받지 않았습니다")
+        return
     await orca("terminal", "send", "--terminal", handle, "--text", text, timeout=60)
     await asyncio.sleep(0.3)
     await orca("terminal", "send", "--terminal", handle, "--text", "\r", timeout=30)
@@ -271,6 +283,29 @@ def mark(o: dict) -> None:
     """Remember where the transcript ends, so the next collect() reads only what comes after."""
     path = Path(o["path"]) if o.get("path") else None
     o["offset"] = path.stat().st_size if path and path.exists() else 0
+
+
+DONE_ON_SCREEN = re.compile(r"(?i)\b(?:worked|crunched)\s+for\b")
+
+
+def screen_reply(rendered: str) -> str:
+    """Best-effort final answer from Codex's visible TUI when no rollout JSONL exists.
+
+    A few Codex/Orca combinations do not create a local rollout file.  The
+    completed answer is still on screen immediately before its ``Worked for``
+    or ``Crunched for`` footer, so use that as a delivery fallback instead of
+    falsely reporting that no answer exists.
+    """
+    lines = [re.sub(r"\x1b\[[0-9;]*m", "", line).rstrip() for line in rendered.splitlines()]
+    done = max((i for i, line in enumerate(lines) if DONE_ON_SCREEN.search(line)), default=-1)
+    if done < 0:
+        return ""
+    start = max((i for i in range(done) if lines[i].lstrip().startswith("•")), default=-1)
+    if start < 0:
+        return ""
+    answer = lines[start:done]
+    answer[0] = re.sub(r"^\s*•\s*", "", answer[0])
+    return "\n".join(answer).strip()
 
 
 async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout: int) -> dict:
@@ -360,6 +395,14 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
             waiter.cancel()
         await asyncio.sleep(0.5)
         await drain()
+        # Some Codex tabs have no local rollout JSONL.  Once the tab is idle,
+        # the answer is nevertheless visible in its TUI; do not spend 30
+        # seconds waiting for a transcript that will never arrive.
+        if engine == "codex" and not o.get("path") and wait.get("satisfied"):
+            visible_reply = screen_reply(await screen(handle, rows=60))
+            if visible_reply:
+                o["inflight"] = []
+                return {"reply": visible_reply, "session": o.get("session"), "waiting": await waiting(handle)}
         if wait.get("blockedReason") or not (o.get("inflight") or state["queued"] > 0 or state["last"] == "user"):
             break
         # idle, but a message typed in mid-turn is still queued or unanswered: it starts one more turn
@@ -371,6 +414,8 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
     if not wait.get("satisfied") and not wait.get("blockedReason"):
         raise OrcaError(f"{engine} 탭이 {timeout}초 안에 끝나지 않았습니다. Orca에서 확인해 주세요.")
     reply = claude_reply(lines) if engine == "claude" else codex_reply(lines)
+    if not reply and engine == "codex":
+        reply = screen_reply(await screen(handle, rows=60))
     return {"reply": reply, "session": o.get("session"), "waiting": await waiting(handle)}
 
 
@@ -391,7 +436,10 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
     o["inflight"] = []  # anything left from an earlier, interrupted turn
     if not prompt.startswith("/"):  # a /command gets no answer in the transcript, so nothing to wait for
         o.setdefault("inflight", []).append(prompt)
-    await type_in(o["handle"], prompt)
+    fresh = bool(o.get("fresh"))
+    await type_in(o["handle"], prompt, confirm_submit=fresh)
+    if fresh:
+        o.pop("fresh", None)
     if prompt.startswith("/"):
         return await settle_command(conv, timeout)
     return await collect(conv, on_step, timeout)

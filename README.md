@@ -94,7 +94,7 @@ Discord 메인 채널에 글   → 새 스레드  ⇄  Orca [macmini-discord ›
                            → 새 스레드 ⇄  Orca [redbox › main] 새 Claude 탭     (그 레포의 CLAUDE.md·스킬)
 ```
 
-- 탭은 `claude --dangerously-skip-permissions --session-id <id>` 또는 `codex --dangerously-bypass-approvals-and-sandbox`로 열리고, 봇은 Orca CLI로 메시지를 입력한 뒤 세션 기록 파일(`~/.claude/projects/…`, `~/.codex/sessions/…`)을 읽어 진행 상황과 답을 Discord로 보냅니다.
+- 탭은 `claude --dangerously-skip-permissions --session-id <id>` 또는 `codex --dangerously-bypass-approvals-and-sandbox`로 열립니다. 새 탭의 첫 메시지는 Orca가 수신을 확인하는 방식으로 보내고, 이후 메시지는 빠른 키 입력으로 보냅니다. 봇은 세션 기록 파일(`~/.claude/projects/…`, `~/.codex/sessions/…`)을 읽어 진행 상황과 답을 Discord로 보내며, Codex 기록이 만들어지지 않은 경우에는 완료된 탭 화면의 답을 예비 경로로 보냅니다.
 - CLI가 답 대신 화면을 띄우면(선택 창, 플랜 승인, `/mcp`·`/model` 메뉴 등) 봇이 탭 화면에서 그 창 부분만 잘라 올리고, 선택지마다 이름 붙은 버튼(`1. 사과` …)과 `↑ ↓ ← → Space`·`Enter Esc ⇧Tab 🔄` 버튼을 붙입니다. 여러 개 고르기는 번호 버튼으로 켜고 끄고, 질문이 여러 개면 `← →`로 넘깁니다. 버튼을 누르면 그 키가 탭에 입력되고, 이어지는 답이나 바뀐 화면이 다시 옵니다. `!screen`으로 언제든 화면을 볼 수 있습니다.
 - `/`로 시작하는 메시지(`/compact`, `/mcp`, `/model` …)는 탭에 그대로 입력됩니다. 플랜 모드는 `⇧Tab` 버튼으로 전환합니다.
 - 탭을 닫거나 Orca가 재시작돼도 다음 메시지에서 `--resume`으로 같은 세션을 다시 엽니다. Orca에서 직접 이어 쓴 내용도 같은 세션에 남습니다.
