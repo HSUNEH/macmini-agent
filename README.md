@@ -94,12 +94,14 @@ Discord 메인 채널에 글   → 새 스레드  ⇄  Orca [macmini-discord ›
                            → 새 스레드 ⇄  Orca [redbox › main] 새 Claude 탭     (그 레포의 CLAUDE.md·스킬)
 ```
 
-- 탭은 `claude --dangerously-skip-permissions --session-id <id>` 또는 `codex --dangerously-bypass-approvals-and-sandbox`로 열립니다. 새 탭의 첫 메시지는 Orca가 수신을 확인하는 방식으로 보내고, 이후 메시지는 빠른 키 입력으로 보냅니다. 봇은 세션 기록 파일(`~/.claude/projects/…`, `~/.codex/sessions/…`)을 읽어 진행 상황과 답을 Discord로 보내며, Codex 기록이 만들어지지 않은 경우에는 완료된 탭 화면의 답을 예비 경로로 보냅니다.
+- 탭은 `claude --dangerously-skip-permissions --session-id <id>` 또는 `codex --dangerously-bypass-approvals-and-sandbox`로 열립니다. 일반 메시지는 매번 Orca 수신 확인으로 보내고, 진행 중 추가 메시지만 빠른 키 입력으로 보냅니다. 봇은 세션 기록 파일을 읽어 답을 보내며, Codex 기록이 없는 경우에는 전송 전 화면과 다른 완료 답변만 예비 경로로 보냅니다.
 - CLI가 답 대신 화면을 띄우면(선택 창, 플랜 승인, `/mcp`·`/model` 메뉴 등) 봇이 탭 화면에서 그 창 부분만 잘라 올리고, 선택지마다 이름 붙은 버튼(`1. 사과` …)과 `↑ ↓ ← → Space`·`Enter Esc ⇧Tab 🔄` 버튼을 붙입니다. 여러 개 고르기는 번호 버튼으로 켜고 끄고, 질문이 여러 개면 `← →`로 넘깁니다. 버튼을 누르면 그 키가 탭에 입력되고, 이어지는 답이나 바뀐 화면이 다시 옵니다. `!screen`으로 언제든 화면을 볼 수 있습니다.
 - `/`로 시작하는 메시지(`/compact`, `/mcp`, `/model` …)는 탭에 그대로 입력됩니다. 플랜 모드는 `⇧Tab` 버튼으로 전환합니다.
 - 탭을 닫거나 Orca가 재시작돼도 다음 메시지에서 `--resume`으로 같은 세션을 다시 엽니다. Orca에서 직접 이어 쓴 내용도 같은 세션에 남습니다.
 - `./deploy.sh`가 메인 폴더(`git init` 포함)와 프로젝트를 Orca 워크스페이스로 등록하고, Claude의 폴더 신뢰 확인을 미리 처리합니다(Codex는 탭을 열 때 처리). 메인 폴더의 `CLAUDE.md`는 `local/main/CLAUDE.md`(예시: `examples/main/`)로 관리합니다.
 - `!claude`/`!codex`로 모델을 바꾸면 탭도 그 CLI로 바뀌고, 각 모델의 세션은 따로 이어집니다.
+- `!model`은 Discord에서 Claude/Codex 전환 버튼과 현재 CLI의 `/model` 선택 화면을 여는 버튼을 보냅니다. 작업 중 전환하면 이전 작업을 중단하고 늦은 답변을 차단한 뒤 전환합니다. 대화 이력은 참고용으로 넘기며 이전 요청에 다시 답하지 않도록 안내합니다.
+- 선택 화면은 최대 25개 항목을 버튼/드롭다운으로 보냅니다. 한 번의 클릭은 현재 선택만 처리하며, 다음 선택 화면이 나오면 새 버튼을 보내고 기다립니다. 지난 메시지의 버튼이나 화면이 바뀐 선택지는 적용하지 않습니다.
 
 ## 작업 파일 형식
 
@@ -129,6 +131,7 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 | (그냥 쓰기) | 채널에 쓰면 새 스레드 + 새 세션, 스레드 안에 쓰면 이어서. 보낸 메시지에 상태 이모지: 🛠️ 처리 중 → ✅ 완료(⚠️ 실패). 작업 중에 보낸 메시지는 바로 탭에 입력돼 진행 중인 작업에 반영됨(📨). 선택 화면 대기 중이거나 헤드리스·`/`명령이면 ⏳를 달고 기다렸다가 보냄 |
 | `!<프로젝트> 할 일` | 그 레포 폴더의 새 세션으로 시작 (`!home`은 일반 대화로) |
 | `!claude` / `!codex` | 모델 전환. 최근 대화를 넘겨줘서 맥락 유지 |
+| `!model` | Discord 버튼으로 CLI 전환 또는 현재 CLI의 세부 모델 선택 |
 | `!effort <단계>` | 이 스레드의 effort: `low`·`medium`·`high`·`xhigh`·`max`, `default`면 해제. 대화는 이어짐 (claude는 `--effort`, codex는 `model_reasoning_effort`) |
 | `!new` · `!stop` · `!status` | 새 세션 · 실행 중단 · 상태와 터미널 이어가기 명령 |
 | `!exit` | (Orca) 탭에 `/exit`을 보내고 탭을 닫음. 다음 메시지에 같은 세션으로 새 탭이 열림 |

@@ -283,6 +283,16 @@ def mark(o: dict) -> None:
     """Remember where the transcript ends, so the next collect() reads only what comes after."""
     path = Path(o["path"]) if o.get("path") else None
     o["offset"] = path.stat().st_size if path and path.exists() else 0
+    o.pop("screen_before", None)
+    o.pop("command_before", None)
+
+
+async def mark_screen(o: dict) -> None:
+    mark(o)
+    if o["engine"] == "codex":
+        rendered = await screen(o["handle"], rows=60)
+        o["screen_before"] = screen_reply(rendered)
+        o["command_before"] = screen_command_output(rendered)
 
 
 DONE_ON_SCREEN = re.compile(r"(?i)\b(?:worked|crunched)\s+for\b")
@@ -384,6 +394,9 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
             wait = None
             while not waiter.done():
                 await drain()
+                if await waiting(handle):
+                    reply = claude_reply(lines) if engine == "claude" else codex_reply(lines)
+                    return {"reply": reply, "session": o.get("session"), "waiting": True}
                 # the transcript marks the end of a turn (claude turn_duration, codex task_complete), well
                 # before the tab looks idle to Orca (codex ~10s later): finish on that
                 if state["last"] == "done" and not o.get("inflight") and state["queued"] <= 0:
@@ -400,7 +413,7 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
         # seconds waiting for a transcript that will never arrive.
         if engine == "codex" and not o.get("path") and wait.get("satisfied"):
             visible_reply = screen_reply(await screen(handle, rows=60))
-            if visible_reply:
+            if visible_reply and visible_reply != o.get("screen_before"):
                 o["inflight"] = []
                 return {"reply": visible_reply, "session": o.get("session"), "waiting": await waiting(handle)}
         if wait.get("blockedReason") or not (o.get("inflight") or state["queued"] > 0 or state["last"] == "user"):
@@ -415,7 +428,14 @@ async def collect(conv: dict, on_step: Callable[[str], Awaitable[None]], timeout
         raise OrcaError(f"{engine} 탭이 {timeout}초 안에 끝나지 않았습니다. Orca에서 확인해 주세요.")
     reply = claude_reply(lines) if engine == "claude" else codex_reply(lines)
     if not reply and engine == "codex":
-        reply = screen_reply(await screen(handle, rows=60))
+        rendered = await screen(handle, rows=60)
+        reply = screen_reply(rendered)
+        if reply == o.get("screen_before"):
+            reply = ""
+        if not reply:
+            result = screen_command_output(rendered)
+            if result != o.get("command_before"):
+                reply = result
     return {"reply": reply, "session": o.get("session"), "waiting": await waiting(handle)}
 
 
@@ -432,14 +452,12 @@ async def run(conv: dict, title: str, prompt: str, system_prompt: str, on_step: 
     # report it so the bot shows the screen with key buttons instead of failing
     if await waiting(o["handle"]):
         return {"reply": "", "session": o.get("session"), "waiting": True, "blocked": True}
-    mark(o)
+    await mark_screen(o)
     o["inflight"] = []  # anything left from an earlier, interrupted turn
     if not prompt.startswith("/"):  # a /command gets no answer in the transcript, so nothing to wait for
         o.setdefault("inflight", []).append(prompt)
-    fresh = bool(o.get("fresh"))
-    await type_in(o["handle"], prompt, confirm_submit=fresh)
-    if fresh:
-        o.pop("fresh", None)
+    await type_in(o["handle"], prompt, confirm_submit=not prompt.startswith("/"))
+    o.pop("fresh", None)
     if prompt.startswith("/"):
         return await settle_command(conv, timeout)
     return await collect(conv, on_step, timeout)
@@ -470,6 +488,8 @@ async def settle_command(conv: dict, timeout: int) -> dict:
             # the session transcript as a local-command result.
             if not out:
                 out = screen_command_output(await screen(o["handle"]))
+                if out == o.get("command_before"):
+                    out = ""
             return {"reply": out, "session": o.get("session"), "waiting": await waiting(o["handle"])}
     return {"reply": "", "session": o.get("session"), "waiting": True}
 
@@ -527,7 +547,7 @@ async def inject(conv: dict, text: str) -> bool:
 async def press(conv: dict, key: str, on_step: Callable[[str], Awaitable[None]], timeout: int = 3600) -> dict:
     """Type one key (see KEYS) into the tab, e.g. to pick a choice, and collect what follows."""
     o = conv["orca"]
-    mark(o)
+    await mark_screen(o)
     await orca("terminal", "send", "--terminal", o["handle"], "--text", KEYS[key], timeout=30)
     await asyncio.sleep(1.0)  # let a turn start (or the menu redraw) before waiting for idle
     return await collect(conv, on_step, timeout)
@@ -542,7 +562,7 @@ async def press_keys(conv: dict, keys: List[str], on_step: Callable[[str], Await
     keyboard shortcut.
     """
     o = conv["orca"]
-    mark(o)
+    await mark_screen(o)
     text = "".join(KEYS[key] for key in keys)
     await orca("terminal", "send", "--terminal", o["handle"], "--text", text, timeout=30)
     await asyncio.sleep(1.0)

@@ -68,7 +68,7 @@ HOME_DIR = os.path.expanduser(CHAT.get("workdir", "~"))
 # "orca": conversations run in visible Orca tabs (see orca_session.py); anything else: headless CLI.
 USE_ORCA = CHAT.get("backend") == "orca"
 HELP = ("프로젝트 개발 얘기면 그 프로젝트 스레드로 옮길지 버튼으로 물어봅니다: " + ", ".join(PROJECTS) + "\n"
-        "`!<프로젝트>` 이 스레드를 그 프로젝트로 · `!home` 일반 대화로 · `!claude` / `!codex` 모델 변경\n"
+        "`!<프로젝트>` 이 스레드를 그 프로젝트로 · `!home` 일반 대화로 · `!model` 모델 선택 버튼 · `!claude` / `!codex` 전환\n"
         "`!effort high` 이 스레드의 effort (low/medium/high/xhigh/max, `default`로 해제) · `!new` 새 세션 · `!resume <세션ID>` Orca 등에서 하던 세션 이어받기 · `!stop` 중단 · `!exit` 탭에 /exit 후 닫기 · `!status` 상태\n"
         "`/mcp`·`/compact` 같은 `/명령`은 탭에 그대로 입력 · `!screen` 탭 화면과 키 버튼 · 선택 창·메뉴가 뜨면 화면이 자동으로 옴\n"
         "`!kakao` 카카오 재로그인 (코드가 이 스레드로 옴) · `!restart` 봇 재시작 (다시 켜지면 이 스레드에 알림)")
@@ -80,6 +80,7 @@ def load_sessions() -> Dict[str, dict]:
     except (OSError, ValueError):
         return {}
     for conv in data.values():  # older format: one "session" for the current engine
+        conv.pop("switching", None)  # an in-process transition cannot survive a restart
         if "session" in conv:
             sid = conv.pop("session")
             conv["sessions"] = {conv.get("engine", "codex"): sid} if sid else {}
@@ -214,11 +215,11 @@ class KeysView(discord.ui.View):
 
     def __init__(self, options: List[Tuple[str, str, bool]] = ()):
         super().__init__(timeout=None)
-        choices = list(options)[:10]
+        choices = list(options)[:25]
         multi = any("☐" in label or "☑" in label for _, label, _ in choices)
         # Buttons are quickest for a handful of choices. A select menu stays
         # readable on Discord mobile when Codex lists many models.
-        if 5 < len(choices) and not multi:
+        if 5 < len(choices):
             self.add_item(discord.ui.Select(
                 custom_id="pickmenu", placeholder="항목을 고르면 바로 적용합니다", min_values=1, max_values=1,
                 options=[discord.SelectOption(label=f"{num}. {label}"[:100], value=str(i), default=current)
@@ -228,7 +229,7 @@ class KeysView(discord.ui.View):
             for i, (num, label, current) in enumerate(choices):
                 self.add_item(discord.ui.Button(label=f"{num}. {label}"[:80], custom_id=f"pick:{i}", row=i // 5,
                                                 style=discord.ButtonStyle.primary if current else discord.ButtonStyle.secondary))
-            base = 2 if len(choices) > 5 else (1 if choices else 0)
+            base = 1 if choices else 0
         controls = [("esc", "취소"), ("screen", "새로고침")]
         if multi:
             controls = [("enter", "완료"), *controls]
@@ -255,7 +256,40 @@ async def post_screen(target: discord.abc.Messageable, conv: dict) -> None:
     embed = discord.Embed(title=f"{engine} 선택", colour=discord.Colour.blurple(),
                           description=f"아래 항목을 누르면 바로 적용합니다.\n```\n{body or ' '}\n```")
     embed.set_footer(text="취소 · 현재 메뉴 닫기   |   새로고침 · 화면 다시 읽기")
-    await target.send(embed=embed, view=KeysView(dialog_options(part)), allowed_mentions=discord.AllowedMentions.none())
+    options = dialog_options(part)
+    message = await target.send(embed=embed, view=KeysView(options), allowed_mentions=discord.AllowedMentions.none())
+    conv["choice"] = {"message": message.id, "handle": handle,
+                      "options": [(num, label) for num, label, _ in options]}
+    save_sessions()
+
+
+class ModelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        for action, label in (("claude", "Claude로 전환"), ("codex", "Codex로 전환"),
+                              ("menu", "현재 모델 세부 선택")):
+            self.add_item(discord.ui.Button(label=label, custom_id=f"model:{action}",
+                                            style=discord.ButtonStyle.primary))
+
+
+async def switch_engine(target, key: str, conv: dict, engine: str) -> None:
+    if conv.get("engine") == engine:
+        return
+    conv["switching"] = True
+    conv["generation"] = conv.get("generation", 0) + 1
+    try:
+        proc = running.get(key)
+        if isinstance(proc, tuple):
+            await orca_session.interrupt(proc[1])
+        elif proc and proc.returncode is None:
+            os.killpg(proc.pid, signal.SIGTERM)
+        async with locks.setdefault(key, asyncio.Lock()):
+            conv["engine"] = engine
+            conv.pop("choice", None)
+    finally:
+        conv.pop("switching", None)
+    sessions[key] = conv
+    save_sessions()
 
 
 def clip(text: str) -> str:
@@ -269,7 +303,7 @@ def carryover(conv: dict, engine: str) -> str:
     if not missed:
         return ""
     turns = "\n\n".join(f"[나] {t['user']}\n[{t['engine']}] {t['reply']}" for t in missed)
-    return f"(이 스레드에서 다른 모델과 나눈 대화입니다. 이 맥락을 이어서 답하세요.)\n\n{turns}\n\n---\n\n"
+    return f"(아래는 참고용 이전 대화입니다. 이전 요청에 다시 답하지 말고, --- 뒤의 최신 메시지에만 답하세요. 완료한 작업을 반복하지 마세요.)\n\n{turns}\n\n---\n\n"
 
 
 def set_project(conv: dict, name: Optional[str]) -> None:
@@ -439,9 +473,12 @@ async def on_message(msg: discord.Message) -> None:
             set_project(conv, None if cmd == "home" else cmd)
             reply = f"`{conv['project'] or '일반'}` (`{conv['workdir']}`)에서 `{conv['engine']}`로 새 세션을 시작합니다."
         elif cmd in engines.ENGINES:
-            conv["engine"] = cmd
+            await switch_engine(target, key, conv, cmd)
             how = "전에 쓰던 세션에 그 사이 대화를 넘겨" if conv.get("sessions", {}).get(cmd) else "새 세션에 지금까지 대화를 넘겨"
             reply = f"이제 `{cmd}`로 이어갑니다 ({how}줍니다, 폴더 `{conv['workdir']}`)."
+        elif cmd == "model":
+            await target.send(f"현재 `{conv['engine']}`입니다. 아래 버튼으로 고르세요.", view=ModelView())
+            return
         elif cmd == "effort":
             level = rest.split()[0].lower() if rest else ""
             rest = ""
@@ -536,6 +573,7 @@ async def on_message(msg: discord.Message) -> None:
             save_sessions()
             if not rest and not msg.attachments:
                 await target.send(reply)
+                await flush(target, key, conv)
                 return
             text = rest
 
@@ -556,8 +594,8 @@ async def submit(target: discord.abc.Messageable, key: str, conv: dict, prompt: 
     """Send a message. While a turn runs in an Orca tab it is typed in right away, so the CLI sees it
     mid-turn (📨); otherwise (headless, or the tab refused it) it is queued and whatever piled up
     goes out together, as one message, as soon as the running turn ends (⏳)."""
-    if locks.setdefault(key, asyncio.Lock()).locked():
-        if uses_orca(conv) and isinstance(running.get(key), tuple) and not pending.get(key):
+    if conv.get("switching") or locks.setdefault(key, asyncio.Lock()).locked():
+        if not conv.get("switching") and uses_orca(conv) and isinstance(running.get(key), tuple) and not pending.get(key):
             try:
                 if await orca_session.inject(conv, prompt):
                     if msg:
@@ -575,7 +613,7 @@ async def submit(target: discord.abc.Messageable, key: str, conv: dict, prompt: 
 
 async def flush(target: discord.abc.Messageable, key: str, conv: dict) -> None:
     """Send the queued messages; keep them if the tab is waiting on a choice (sent after it)."""
-    while pending.get(key) and not locks.setdefault(key, asyncio.Lock()).locked():
+    while pending.get(key) and not conv.get("switching") and not locks.setdefault(key, asyncio.Lock()).locked():
         batch = pending.pop(key)
         out = await ask(target, key, conv, "\n\n".join(text for text, _ in batch), msgs=[m for _, m in batch if m])
         if out.get("blocked"):
@@ -612,6 +650,7 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
     async with lock:
         await mark(msgs, "🛠️", drop=("⏳",))
         engine = conv["engine"]
+        generation = conv.get("generation", 0)
         sid = conv.setdefault("sessions", {}).get(engine)
         full = prompt if raw or press else carryover(conv, engine) + prompt
         status = Status(target, engine)
@@ -640,10 +679,17 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
                     reply_text, session = await run_engine(key, engine, sid, conv["workdir"], full, status, conv.get("effort"))
         except (engines.EngineError, orca_session.OrcaError) as exc:
             await status.finish(False)
+            if generation != conv.get("generation", 0):
+                await mark(msgs, "⏹️", drop=("🛠️",))
+                return {"superseded": True}
             hint = " 세션이 꼬였으면 `!new`로 새로 시작하세요." if sid and "!stop" not in str(exc) else ""
             await target.send(f"⚠️ {str(exc)[:1500]}{hint}")
             await mark(msgs, "⚠️", drop=("🛠️",))
             return {"error": True}
+        if generation != conv.get("generation", 0):
+            await status.finish(False)
+            await mark(msgs, "⏹️", drop=("🛠️",))
+            return {"superseded": True}
         await status.finish(True)
         reply_text, handoff = take_handoff(reply_text, conv)
         if session:
@@ -679,10 +725,28 @@ async def on_interaction(inter: discord.Interaction) -> None:
     """Buttons: key:<name> types a key into the thread's Orca tab; handoff:<project> opens a
     [project] thread with a fresh repo session and sends it the request."""
     custom_id = (inter.data or {}).get("custom_id", "")
-    if inter.type is not discord.InteractionType.component or not (custom_id == "pickmenu" or custom_id.startswith(("handoff:", "key:", "pick:"))):
+    if inter.type is not discord.InteractionType.component or not (custom_id == "pickmenu" or custom_id.startswith(("model:", "handoff:", "key:", "pick:"))):
         return
     if str(inter.user.id) not in CHAT["users"]:
         await inter.response.send_message("이 버튼은 쓸 수 없습니다.", ephemeral=True)
+        return
+    if custom_id.startswith("model:"):
+        await inter.response.defer()
+        key, target = str(inter.channel.id), inter.channel
+        conv = sessions.get(key)
+        if not conv:
+            await inter.followup.send("먼저 이 스레드에 메시지를 보내주세요.", ephemeral=True)
+            return
+        action = custom_id.split(":", 1)[1]
+        if action in engines.ENGINES:
+            await switch_engine(target, key, conv, action)
+            await target.send(f"`{action}`로 전환했습니다. 이전 대화는 이어지고, 이전 요청의 늦은 답은 보내지 않습니다.", view=ModelView())
+            await flush(target, key, conv)
+        elif action == "menu":
+            if locks.setdefault(key, asyncio.Lock()).locked():
+                await inter.followup.send("진행 중인 답변이 끝나면 세부 모델을 선택할 수 있습니다.", ephemeral=True)
+                return
+            await ask(target, key, conv, "/model", raw=True)
         return
     if custom_id.startswith("key:"):
         await on_key(inter, custom_id.split(":", 1)[1])
@@ -729,6 +793,19 @@ async def on_key(inter: discord.Interaction, name: str) -> None:
     key, target = str(inter.channel.id), inter.channel
     conv = sessions.get(key) or {}
     handle = (conv.get("orca") or {}).get("handle")
+    choice = conv.get("choice") or {}
+    if name != "screen" and (choice.get("message") != inter.message.id or choice.get("handle") != handle):
+        await inter.response.send_message("지난 선택 화면입니다. 최신 버튼을 눌러주세요.", ephemeral=True)
+        return
+    if name != "screen":
+        if not handle or not await orca_session.waiting(handle):
+            await inter.response.send_message("이 선택 화면은 이미 끝났습니다.", ephemeral=True)
+            return
+        options = dialog_options(dialog_part(await orca_session.screen(handle)))
+        if [(num, label) for num, label, _ in options] != [tuple(item) for item in choice.get("options", [])]:
+            await inter.response.send_message("선택 화면이 바뀌었습니다. 새 버튼으로 골라주세요.", ephemeral=True)
+            await post_screen(target, conv)
+            return
     if not handle or (name != "screen" and name not in orca_session.KEYS):
         await inter.response.send_message("열린 Orca 탭이 없습니다.", ephemeral=True)
         return
@@ -746,11 +823,19 @@ async def on_pick(inter: discord.Interaction, index: int) -> None:
     key, target = str(inter.channel.id), inter.channel
     conv = sessions.get(key) or {}
     handle = (conv.get("orca") or {}).get("handle")
+    choice = conv.get("choice") or {}
+    if choice.get("message") != inter.message.id or choice.get("handle") != handle:
+        await inter.response.send_message("지난 선택 화면입니다. 최신 버튼을 눌러주세요.", ephemeral=True)
+        return
     if not handle or not await orca_session.waiting(handle):
         await inter.response.send_message("이 선택 화면은 이미 끝났습니다. `!screen`으로 현재 상태를 확인하세요.", ephemeral=True)
         return
     options = dialog_options(dialog_part(await orca_session.screen(handle)))
-    if index >= len(options):
+    if [(num, label) for num, label, _ in options] != [tuple(item) for item in choice.get("options", [])]:
+        await inter.response.send_message("다음 선택 화면으로 바뀌었습니다. 새 버튼을 보내드릴게요.", ephemeral=True)
+        await post_screen(target, conv)
+        return
+    if index < 0 or index >= len(options):
         await inter.response.send_message("이 선택지는 더 이상 없습니다. `새로고침`을 눌러주세요.", ephemeral=True)
         return
     current = next((i for i, (_, _, selected) in enumerate(options) if selected), 0)
