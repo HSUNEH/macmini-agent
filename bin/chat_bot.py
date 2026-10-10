@@ -744,9 +744,9 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
             await target.send(chunk, allowed_mentions=discord.AllowedMentions.none())
         if uses_orca(conv) and out.get("blocked"):
             await target.send("⏸️ 탭이 아래 화면에서 선택을 기다리고 있어요. 메시지는 모아 뒀다가, 버튼으로 처리하면 이어서 보낼게요.")
-        if uses_orca(conv) and (waiting or ((raw or press is not None) and not reply_text)):  # a choice, approval or menu
+        if uses_orca(conv) and waiting:  # a choice, approval or menu is open
             await post_screen(target, conv)
-        elif uses_orca(conv) and not reply_text:
+        elif uses_orca(conv) and not reply_text and not raw and press is None:  # a /command or key with no output: ✅ is enough
             await target.send("(답을 세션 기록에서 찾지 못했어요. `!screen`으로 탭 화면을 볼 수 있어요.)")
         if handoff:
             await target.send(f"🔎 `{handoff[0]}` 프로젝트로 감지됐어요! 새 세션으로 이어서 작업할까요?\n> {handoff[1][:300]}",
