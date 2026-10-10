@@ -36,7 +36,7 @@
     "users": [
       "YOUR_DISCORD_USER_ID"
     ],
-    "backend": "cli",
+    "backend": "direct",
     "default_engine": "codex",
     "workdir": "~",
     "timeout": 3600,

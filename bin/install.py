@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import time
@@ -28,6 +29,7 @@ HOME = Path.home() / ".macmini-agent"
 AGENTS = Path.home() / "Library" / "LaunchAgents"
 LOGS = HOME / "logs"
 VENV = HOME / "venv"
+CHAT_VENV = HOME / "chat-venv"
 PREFIX = "com.macmini-agent."
 DOMAIN = f"gui/{subprocess.check_output(['id', '-u'], text=True).strip()}"
 
@@ -37,6 +39,26 @@ def ensure_venv() -> None:
         subprocess.run(["/usr/bin/python3", "-m", "venv", str(VENV)], check=True)
     subprocess.run([str(VENV / "bin" / "pip"), "install", "-q", "--disable-pip-version-check",
                     "-r", str(ROOT / "requirements.txt")], check=True)
+
+
+def direct_chat() -> bool:
+    return json.loads((ROOT / "local" / "config.json").read_text()).get("chat", {}).get("backend") == "direct"
+
+
+def ensure_chat_venv() -> None:
+    if not (CHAT_VENV / "bin" / "python").exists():
+        candidates = [shutil.which("python3.11"), str(Path.home() / ".local/bin/python3.11"),
+                      "/opt/homebrew/bin/python3", shutil.which("python3")]
+        for candidate in candidates:
+            if candidate and Path(candidate).exists():
+                probe = subprocess.run([candidate, "-c", "import sys; sys.exit(sys.version_info < (3, 10))"])
+                if probe.returncode == 0:
+                    subprocess.run([candidate, "-m", "venv", str(CHAT_VENV)], check=True)
+                    break
+        else:
+            raise RuntimeError("직접 연결에는 Python 3.10+가 필요합니다. Python 3.11을 먼저 설치해주세요.")
+    subprocess.run([str(CHAT_VENV / "bin/pip"), "install", "-q", "--disable-pip-version-check",
+                    "-r", str(ROOT / "requirements-chat.txt")], check=True)
 
 
 def link_skills() -> None:
@@ -113,7 +135,7 @@ def job_plist(job: str, schedule: list) -> bytes:
 def chat_plist() -> bytes:
     return plistlib.dumps({
         "Label": PREFIX + "chat",
-        "ProgramArguments": [str(VENV / "bin" / "python"), "-u", str(ROOT / "bin" / "chat_bot.py")],
+        "ProgramArguments": [str((CHAT_VENV if direct_chat() else VENV) / "bin" / "python"), "-u", str(ROOT / "bin" / "chat_bot.py")],
         "RunAtLoad": True,
         "KeepAlive": True,
         "ThrottleInterval": 30,
@@ -140,6 +162,8 @@ def main() -> int:
     restart = "--restart" in sys.argv
     LOGS.mkdir(parents=True, exist_ok=True)
     ensure_venv()
+    if direct_chat():
+        ensure_chat_venv()
     link_skills()
     ensure_orca()
     wanted = set()
