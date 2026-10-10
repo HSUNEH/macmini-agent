@@ -146,6 +146,10 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 
 봇은 확인 창 없이 실행됩니다(`bypassPermissions` / `--dangerously-bypass-approvals-and-sandbox`). Discord에서는 "허용할까요?"에 답할 방법이 없기 때문입니다. `chat.users`에 본인만 넣고, 되돌리기 어려운 일은 먼저 묻도록 `PROMPT.md`에 적어 두세요.
 
+## macOS 권한 팝업 자동 허용 (선택)
+
+`python3 bin/permission_auto_allow.py --install`로 일반 접근 권한 팝업 감시를 켤 수 있습니다. 대상 앱·권한은 `local/permission-auto-allow.json`에서 설정합니다. [설정과 중지 방법](docs/permission-auto-allow.md)을 참고하세요.
+
 ## 운영
 
 - **배포:** `./deploy.sh`는 맥의 `~/macmini_agent`로 rsync 후 launchd를 다시 등록합니다.
