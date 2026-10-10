@@ -150,6 +150,12 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 
 `python3 bin/permission_auto_allow.py --install`로 일반 접근 권한 팝업 감시를 켤 수 있습니다. 대상 앱·권한은 `local/permission-auto-allow.json`에서 설정합니다. [설정과 중지 방법](docs/permission-auto-allow.md)을 참고하세요.
 
+## 잠금 뒤 화면만 끄기 (선택)
+
+`python3 bin/lock_display_sleep.py --install`은 macOS 잠금을 감지하고 5초 뒤 `pmset displaysleepnow`로 디스플레이만 끕니다(감지 간격 0.5초). 잠금 해제 시 타이머를 취소하고, 잠금 한 번당 한 번만 실행하므로 키보드로 화면을 깨워 암호를 입력할 수 있습니다. Mac 본체의 잠자기 설정은 변경하지 않습니다. 디스코드 봇을 계속 실행하려면 본체 잠자기는 별도로 꺼두세요.
+
+로그: `~/.macmini-agent/logs/lock-display-sleep.log`. 상태 확인: `python3 bin/lock_display_sleep.py --status`. 중지: `launchctl bootout "gui/$(id -u)/com.macmini-agent.lock-display-sleep"`. 로그인 시 자동 실행되며, 생성된 `local/launchd/` 설정은 노트북에서 `./pull.sh`로 가져갈 수 있습니다.
+
 ## 운영
 
 - **배포:** `./deploy.sh`는 맥의 `~/macmini_agent`로 rsync 후 launchd를 다시 등록합니다.
