@@ -219,7 +219,7 @@ class KeysView(discord.ui.View):
         multi = any("☐" in label or "☑" in label for _, label, _ in choices)
         # Buttons are quickest for a handful of choices. A select menu stays
         # readable on Discord mobile when Codex lists many models.
-        if 5 < len(choices):
+        if 10 < len(choices):
             self.add_item(discord.ui.Select(
                 custom_id="pickmenu", placeholder="항목을 고르면 바로 적용합니다", min_values=1, max_values=1,
                 options=[discord.SelectOption(label=f"{num}. {label}"[:100], value=str(i), default=current)
@@ -229,7 +229,7 @@ class KeysView(discord.ui.View):
             for i, (num, label, current) in enumerate(choices):
                 self.add_item(discord.ui.Button(label=f"{num}. {label}"[:80], custom_id=f"pick:{i}", row=i // 5,
                                                 style=discord.ButtonStyle.primary if current else discord.ButtonStyle.secondary))
-            base = 1 if choices else 0
+            base = 2 if len(choices) > 5 else (1 if choices else 0)
         controls = [("esc", "취소"), ("screen", "새로고침")]
         if multi:
             controls = [("enter", "완료"), *controls]
@@ -270,6 +270,15 @@ class ModelView(discord.ui.View):
                               ("menu", "현재 모델 세부 선택")):
             self.add_item(discord.ui.Button(label=label, custom_id=f"model:{action}",
                                             style=discord.ButtonStyle.primary))
+
+
+class ModelChoiceView(discord.ui.View):
+    """Named model buttons; verify their names against the live /model menu before selecting."""
+    def __init__(self, names):
+        super().__init__(timeout=None)
+        for i, name in enumerate(names[:10]):
+            self.add_item(discord.ui.Button(label=name, custom_id=f"modelname:{name}",
+                                            row=i // 5, style=discord.ButtonStyle.primary))
 
 
 async def switch_engine(target, key: str, conv: dict, engine: str) -> None:
@@ -477,7 +486,13 @@ async def on_message(msg: discord.Message) -> None:
             how = "전에 쓰던 세션에 그 사이 대화를 넘겨" if conv.get("sessions", {}).get(cmd) else "새 세션에 지금까지 대화를 넘겨"
             reply = f"이제 `{cmd}`로 이어갑니다 ({how}줍니다, 폴더 `{conv['workdir']}`)."
         elif cmd == "model":
-            await target.send(f"현재 `{conv['engine']}`입니다. 아래 버튼으로 고르세요.", view=ModelView())
+            if not uses_orca(conv):
+                await target.send("세부 모델 선택 버튼은 Orca 연결에서 사용할 수 있습니다.")
+                return
+            if locks.setdefault(key, asyncio.Lock()).locked():
+                await target.send("진행 중인 답변이 끝나면 `!model`로 모델 선택 버튼을 열 수 있습니다.")
+                return
+            await ask(target, key, conv, "/model", raw=True)
             return
         elif cmd == "effort":
             level = rest.split()[0].lower() if rest else ""
@@ -725,10 +740,36 @@ async def on_interaction(inter: discord.Interaction) -> None:
     """Buttons: key:<name> types a key into the thread's Orca tab; handoff:<project> opens a
     [project] thread with a fresh repo session and sends it the request."""
     custom_id = (inter.data or {}).get("custom_id", "")
-    if inter.type is not discord.InteractionType.component or not (custom_id == "pickmenu" or custom_id.startswith(("model:", "handoff:", "key:", "pick:"))):
+    if inter.type is not discord.InteractionType.component or not (custom_id == "pickmenu" or custom_id.startswith(("modelname:", "model:", "handoff:", "key:", "pick:"))):
         return
     if str(inter.user.id) not in CHAT["users"]:
         await inter.response.send_message("이 버튼은 쓸 수 없습니다.", ephemeral=True)
+        return
+    if custom_id.startswith("modelname:"):
+        await inter.response.defer()
+        key, target = str(inter.channel.id), inter.channel
+        conv = sessions.get(key)
+        if not conv or locks.setdefault(key, asyncio.Lock()).locked():
+            await inter.followup.send("답변이 끝난 뒤 모델 버튼을 눌러주세요.", ephemeral=True)
+            return
+        name = custom_id.split(":", 1)[1]
+        handle = (conv.get("orca") or {}).get("handle")
+        if not handle or not await orca_session.waiting(handle):
+            out = await ask(target, key, conv, "/model", raw=True)
+            if not out.get("waiting"):
+                return
+        handle = (conv.get("orca") or {}).get("handle")
+        options = dialog_options(dialog_part(await orca_session.screen(handle)))
+        index = next((i for i, (_, label, _) in enumerate(options)
+                      if label.removesuffix(" (current)").strip().casefold() == name.casefold()), None)
+        if index is None:
+            await inter.followup.send("현재 메뉴에서 이 모델을 찾지 못했습니다. 새로 보낸 선택 버튼을 사용해주세요.", ephemeral=True)
+            await post_screen(target, conv)
+            return
+        current = next((i for i, (_, _, selected) in enumerate(options) if selected), 0)
+        moves = (["down"] * (index-current) if index >= current else ["up"] * (current-index)) + ["enter"]
+        await ask(target, key, conv, "", press=moves)
+        # Do not flush queued prompts here: the next effort/confirmation belongs to the user.
         return
     if custom_id.startswith("model:"):
         await inter.response.defer()
