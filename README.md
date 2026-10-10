@@ -32,7 +32,7 @@ LLM은 Discord 토큰을 모릅니다. 보낼 내용을 파일로 쓰면 스크�
 | 카드뉴스 | `cards: true`인 작업은 LLM이 내용만 쓰고, 템플릿이 1080×1350 PNG로 그려 Discord에 올림 (헤드리스 Chrome). 원문 대표 이미지(Open Graph)와 매체 로고를 자동으로 넣으며, 한글·숫자가 깨지지 않음 |
 | 대화 봇 | 채널에 쓰면 스레드가 열리고 스레드마다 CLI 세션 하나. 작업 중 `!stop`, 모델 전환 `!claude`/`!codex`(대화 유지) |
 | 프로젝트 개발 | 대화가 등록된 프로젝트 개발이면 모델이 `[프로젝트] 스레드에서 이어가기` 버튼을 달고, 누르면 그 레포 폴더에서 새 세션이 시작됨 |
-| 직접 연결 (`backend: direct`, 기본) | 봇이 `codex app-server`와 Claude Agent SDK에 직접 붙음. 화면 읽기·키 입력 없이 답·질문·플랜 승인을 데이터로 받아 Discord 버튼으로 처리. 도구 실행 승인은 묻지 않음(예전 탭의 권한 생략과 같음). Python 3.10+ 필요(`~/.macmini-agent/chat-venv`) |
+| 직접 연결 (`backend: direct`, 기본) | 봇이 `codex app-server`와 Claude Agent SDK에 직접 붙음. 화면 읽기·키 입력 없이 답·질문·플랜 승인을 데이터로 받아 Discord 버튼으로 처리. claude는 `bypassPermissions`(= `--dangerously-skip-permissions`), codex는 승인 없음+샌드박스 없음(yolo)으로 실행. 질문·플랜 승인만 버튼으로 옴. Python 3.10+ 필요(`~/.macmini-agent/chat-venv`) |
 | Orca 연동 (`backend: orca`) | Claude·Codex 대화가 맥의 [Orca](https://github.com/stablyai/orca) 안의 실제 탭으로 열림. 메인 스레드는 메인 워크스페이스 탭, 프로젝트 스레드는 그 레포 탭. Discord에서 하던 대화를 Orca에서 바로 보고 이어 쓸 수 있고, 선택 창·플랜 승인·`/mcp` 같은 화면도 Discord에서 버튼으로 조작 |
 | 터미널과 세션 공유 | `!status`가 알려주는 `cd <폴더> && claude --resume <id>`로 맥에서 이어서 작업, 반대로 `!resume <id>` |
 | 모델 교체 | `bin/engines.py`에 CLI 하나당 build/parse/progress 함수만 쓰면 새 모델 추가 |

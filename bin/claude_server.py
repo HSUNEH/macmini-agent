@@ -108,7 +108,7 @@ class ClaudeServer:
         async def work():
             options = self.options(cwd=conv["workdir"], resume=conv.get("sessions", {}).get("claude"),
                 fork_session=bool(conv.get("claude_migrate")), model=conv.get("model"),
-                effort=conv.get("effort"), permission_mode="plan" if conv.get("mode") == "plan" else "default",
+                effort=conv.get("effort"), permission_mode="plan" if conv.get("mode") == "plan" else "bypassPermissions",  # yolo, like --dangerously-skip-permissions
                 system_prompt={"type": "preset", "preset": "claude_code", "append": instructions},
                 can_use_tool=permission)
             async with ClaudeSDKClient(options=options) as client:
