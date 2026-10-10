@@ -35,6 +35,7 @@ KEYS = {"up": "\x1b[A", "down": "\x1b[B", "left": "\x1b[D", "right": "\x1b[C", "
 
 # key hints under a menu or choice ("esc to interrupt" while working is not one)
 MENU_HINT = re.compile(r"(?i)esc to (cancel|close|exit|go back)|esc back|enter to (select|confirm)|enter select")
+MODEL_CHANGED = re.compile(r"(?i)\bmodel changed to\s+(.+?)\s*$")
 
 
 class OrcaError(Exception):
@@ -176,6 +177,18 @@ async def close(handle: Optional[str]) -> None:
             pass
 
 
+async def exit_tab(handle: Optional[str]) -> None:
+    """Quit the CLI with /exit (so it saves and ends the session cleanly), then close the tab."""
+    if not handle:
+        return
+    try:
+        await type_in(handle, "/exit")
+        await orca("terminal", "wait", "--terminal", handle, "--for", "exit", "--timeout-ms", "5000", timeout=20)
+    except OrcaError:
+        pass
+    await close(handle)
+
+
 async def ensure_tab(conv: dict, title: str, system_prompt: str) -> dict:
     """The thread's live tab for its current engine and folder, opening (or resuming) one if needed."""
     o: Dict = conv.setdefault("orca", {})
@@ -239,12 +252,19 @@ async def screen(handle: str, rows: int = 30) -> str:
 
 
 async def waiting(handle: str) -> bool:
-    """True when the CLI waits on a screen (choice, approval, menu) rather than for a new message."""
+    """True only for a choice/approval menu, not Codex's ordinary input prompt.
+
+    Orca marks both states as ``agentWait``.  Treating every agentWait as a dialog
+    made Discord show a useless bank of arrow-key buttons below a normal
+    ``Ask Codex to do anything`` prompt.
+    """
     try:
         t = (await orca("terminal", "show", "--terminal", handle, timeout=30))["terminal"]
     except OrcaError:
         return False
-    return bool(t.get("agentWait"))
+    if not t.get("agentWait"):
+        return False
+    return bool(MENU_HINT.search(await screen(handle)))
 
 
 def mark(o: dict) -> None:
@@ -398,6 +418,10 @@ async def settle_command(conv: dict, timeout: int) -> dict:
                 if out:
                     break
                 await asyncio.sleep(0.5)
+            # Codex's /model confirmation is drawn only in the TUI, not in
+            # the session transcript as a local-command result.
+            if not out:
+                out = screen_command_output(await screen(o["handle"]))
             return {"reply": out, "session": o.get("session"), "waiting": await waiting(o["handle"])}
     return {"reply": "", "session": o.get("session"), "waiting": True}
 
@@ -425,6 +449,16 @@ def command_output(o: dict) -> str:
     return "\n".join(outs)[:500]
 
 
+def screen_command_output(rendered: str) -> str:
+    """Return concise results that Codex draws only in its TUI."""
+    for line in reversed(rendered.splitlines()):
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", line).strip().lstrip("•").strip()
+        match = MODEL_CHANGED.search(plain)
+        if match:
+            return f"모델을 `{match.group(1)}`로 변경했어요."
+    return ""
+
+
 async def inject(conv: dict, text: str) -> bool:
     """Type a message into the tab while a turn runs; the CLI takes it in mid-turn (or right after),
     and the running collect() follows until that is answered too. False while the tab shows a
@@ -448,6 +482,22 @@ async def press(conv: dict, key: str, on_step: Callable[[str], Awaitable[None]],
     mark(o)
     await orca("terminal", "send", "--terminal", o["handle"], "--text", KEYS[key], timeout=30)
     await asyncio.sleep(1.0)  # let a turn start (or the menu redraw) before waiting for idle
+    return await collect(conv, on_step, timeout)
+
+
+async def press_keys(conv: dict, keys: List[str], on_step: Callable[[str], Awaitable[None]],
+                     timeout: int = 3600) -> dict:
+    """Send a short sequence of navigation keys, then collect the result.
+
+    Used for a Discord option button: move from the highlighted row to that
+    row and confirm it, rather than pretending a displayed row number is a
+    keyboard shortcut.
+    """
+    o = conv["orca"]
+    mark(o)
+    text = "".join(KEYS[key] for key in keys)
+    await orca("terminal", "send", "--terminal", o["handle"], "--text", text, timeout=30)
+    await asyncio.sleep(1.0)
     return await collect(conv, on_step, timeout)
 
 

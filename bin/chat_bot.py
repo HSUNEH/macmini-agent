@@ -18,6 +18,7 @@ Commands (in any message):
   !new                     forget the conversation: new sessions, same engine and folder
   !resume <session-id>     attach this thread to an existing session (e.g. one started in Orca)
   !stop                    stop the running task
+  !exit                    (orca) type /exit into the tab and close it; the next message resumes the session
   !screen                  (orca) show the tab's screen with key buttons (↑ ↓ Enter Esc 1-4 Shift+Tab)
   /command                 (orca) typed into the tab as is: /mcp, /compact, /model, ...
   !kakao                   Kakao re-login; the phone code is posted in this thread
@@ -68,7 +69,7 @@ HOME_DIR = os.path.expanduser(CHAT.get("workdir", "~"))
 USE_ORCA = CHAT.get("backend") == "orca"
 HELP = ("프로젝트 개발 얘기면 그 프로젝트 스레드로 옮길지 버튼으로 물어봅니다: " + ", ".join(PROJECTS) + "\n"
         "`!<프로젝트>` 이 스레드를 그 프로젝트로 · `!home` 일반 대화로 · `!claude` / `!codex` 모델 변경\n"
-        "`!effort high` 이 스레드의 effort (low/medium/high/xhigh/max, `default`로 해제) · `!new` 새 세션 · `!resume <세션ID>` Orca 등에서 하던 세션 이어받기 · `!stop` 중단 · `!status` 상태\n"
+        "`!effort high` 이 스레드의 effort (low/medium/high/xhigh/max, `default`로 해제) · `!new` 새 세션 · `!resume <세션ID>` Orca 등에서 하던 세션 이어받기 · `!stop` 중단 · `!exit` 탭에 /exit 후 닫기 · `!status` 상태\n"
         "`/mcp`·`/compact` 같은 `/명령`은 탭에 그대로 입력 · `!screen` 탭 화면과 키 버튼 · 선택 창·메뉴가 뜨면 화면이 자동으로 옴\n"
         "`!kakao` 카카오 재로그인 (코드가 이 스레드로 옴) · `!restart` 봇 재시작 (다시 켜지면 이 스레드에 알림)")
 
@@ -161,7 +162,7 @@ def uses_orca(conv: dict) -> bool:
     return USE_ORCA
 
 
-OPTION = re.compile(r"^\s*([❯›>])?\s*([1-9])\.\s+(.+?)\s*$")
+OPTION = re.compile(r"^\s*([❯›>])?\s*([1-9]|1\d|2[0-5])\.\s+(.+?)\s*$")
 RULE = re.compile(r"─{10,}")
 
 
@@ -204,21 +205,38 @@ def dialog_options(part: str) -> List[Tuple[str, str, bool]]:
 
 
 class KeysView(discord.ui.View):
-    """Buttons under a tab screen: one per numbered option, then navigation and action keys.
-    Clicks are handled in on_interaction by custom_id ("key:<name>")."""
-    NAV = [("up", "↑"), ("down", "↓"), ("left", "←"), ("right", "→"), ("space", "Space")]
-    ACT = [("enter", "⏎ Enter"), ("esc", "Esc"), ("stab", "⇧Tab"), ("screen", "🔄")]
+    """Compact Discord controls for an actual CLI choice screen.
+
+    A numbered line in Codex is a visual list item, not reliably a numeric
+    keyboard shortcut. Option buttons therefore move to that row and select
+    it. The old all-purpose arrow-key keypad is intentionally omitted.
+    """
 
     def __init__(self, options: List[Tuple[str, str, bool]] = ()):
         super().__init__(timeout=None)
-        for i, (num, label, current) in enumerate(list(options)[:10]):
-            self.add_item(discord.ui.Button(label=f"{num}. {label}", custom_id=f"key:{num}", row=i // 5,
-                                            style=discord.ButtonStyle.primary if current else discord.ButtonStyle.secondary))
-        base = 2 if len(options) > 5 else (1 if options else 0)
-        for row, keys in ((base, self.NAV), (base + 1, self.ACT)):
-            for name, label in keys:
-                self.add_item(discord.ui.Button(label=label, custom_id=f"key:{name}", row=row,
-                                                style=discord.ButtonStyle.success if name == "enter" else discord.ButtonStyle.secondary))
+        choices = list(options)[:10]
+        multi = any("☐" in label or "☑" in label for _, label, _ in choices)
+        # Buttons are quickest for a handful of choices. A select menu stays
+        # readable on Discord mobile when Codex lists many models.
+        if 5 < len(choices) and not multi:
+            self.add_item(discord.ui.Select(
+                custom_id="pickmenu", placeholder="항목을 고르면 바로 적용합니다", min_values=1, max_values=1,
+                options=[discord.SelectOption(label=f"{num}. {label}"[:100], value=str(i), default=current)
+                         for i, (num, label, current) in enumerate(choices)], row=0))
+            base = 1
+        else:
+            for i, (num, label, current) in enumerate(choices):
+                self.add_item(discord.ui.Button(label=f"{num}. {label}"[:80], custom_id=f"pick:{i}", row=i // 5,
+                                                style=discord.ButtonStyle.primary if current else discord.ButtonStyle.secondary))
+            base = 2 if len(choices) > 5 else (1 if choices else 0)
+        controls = [("esc", "취소"), ("screen", "새로고침")]
+        if multi:
+            controls = [("enter", "완료"), *controls]
+        elif not choices:
+            controls = [("enter", "확인"), *controls]
+        for name, label in controls:
+            self.add_item(discord.ui.Button(label=label, custom_id=f"key:{name}", row=base,
+                                            style=discord.ButtonStyle.success if name == "enter" else discord.ButtonStyle.secondary))
 
 
 async def post_screen(target: discord.abc.Messageable, conv: dict) -> None:
@@ -226,10 +244,18 @@ async def post_screen(target: discord.abc.Messageable, conv: dict) -> None:
     if not handle:
         await target.send("열린 Orca 탭이 없습니다. 메시지를 보내면 탭이 열립니다.")
         return
-    part = dialog_part(await orca_session.screen(handle))
+    screen = await orca_session.screen(handle)
+    if not await orca_session.waiting(handle):
+        body = screen.replace("```", "ˋˋˋ")[-1800:]
+        await target.send(f"🖥️ 현재 탭 화면\n```\n{body or ' '}\n```", allowed_mentions=discord.AllowedMentions.none())
+        return
+    part = dialog_part(screen)
     body = part.replace("```", "ˋˋˋ")[-1800:]
-    await target.send(f"🖥️ 선택 화면 (버튼으로 고르거나, 메시지를 쓰면 그대로 입력)\n```\n{body or ' '}\n```",
-                      view=KeysView(dialog_options(part)), allowed_mentions=discord.AllowedMentions.none())
+    engine = "Codex" if conv.get("engine") == "codex" else "Claude"
+    embed = discord.Embed(title=f"{engine} 선택", colour=discord.Colour.blurple(),
+                          description=f"아래 항목을 누르면 바로 적용합니다.\n```\n{body or ' '}\n```")
+    embed.set_footer(text="취소 · 현재 메뉴 닫기   |   새로고침 · 화면 다시 읽기")
+    await target.send(embed=embed, view=KeysView(dialog_options(part)), allowed_mentions=discord.AllowedMentions.none())
 
 
 def clip(text: str) -> str:
@@ -457,6 +483,19 @@ async def on_message(msg: discord.Message) -> None:
             else:
                 await target.send("실행 중인 작업이 없습니다.")
             return
+        elif cmd == "exit":
+            handle = (conv.get("orca") or {}).get("handle")
+            if not handle:
+                await target.send("열린 Orca 탭이 없습니다.")
+            elif key in running:
+                await target.send("작업 중입니다. `!stop`으로 멈춘 뒤 다시 보내 주세요.")
+            else:
+                conv.pop("orca", None)
+                sessions[key] = conv
+                save_sessions()
+                await orca_session.exit_tab(handle)
+                await target.send("탭에 `/exit`을 보내고 닫았습니다. 다음 메시지를 보내면 같은 세션으로 새 탭이 열립니다.")
+            return
         elif cmd == "status":
             sid = conv.get("sessions", {}).get(conv["engine"])
             hint = f"\n터미널에서 이어가기: `cd {conv['workdir']} && {engines.ENGINES[conv['engine']].resume_hint(sid)}`" if sid else ""
@@ -561,7 +600,7 @@ async def mark(msgs: List[discord.Message], add: str, drop: Tuple[str, ...] = ()
 
 
 async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str,
-              msg: Optional[discord.Message] = None, raw: bool = False, press: Optional[str] = None,
+              msg: Optional[discord.Message] = None, raw: bool = False, press: Optional[object] = None,
               msgs: Optional[List[discord.Message]] = None) -> dict:
     """Run one prompt in the conversation's engine session and post the reply. raw: send the text
     to the tab as typed (a /command); press: type one key into the tab instead of a message.
@@ -583,9 +622,12 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
                     title = (getattr(target, "name", None) or "discord")[:60]
                     timeout = int(CHAT.get("timeout", 3600))
                     try:
-                        if press:
+                        if press is not None:
                             running[key] = ("orca", conv["orca"]["handle"])
-                            out = await orca_session.press(conv, press, status.add, timeout)
+                            if isinstance(press, list):
+                                out = await orca_session.press_keys(conv, press, status.add, timeout)
+                            else:
+                                out = await orca_session.press(conv, press, status.add, timeout)
                         else:
                             out = await orca_session.run(conv, title, full, first_prompt(conv), status.add,
                                                          lambda handle: running.__setitem__(key, ("orca", handle)), timeout)
@@ -620,7 +662,7 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
             await target.send(chunk, allowed_mentions=discord.AllowedMentions.none())
         if uses_orca(conv) and out.get("blocked"):
             await target.send("⏸️ 탭이 아래 화면에서 선택을 기다리고 있어요. 메시지는 모아 뒀다가, 버튼으로 처리하면 이어서 보낼게요.")
-        if uses_orca(conv) and (waiting or ((raw or press) and not reply_text)):  # a choice, approval or menu
+        if uses_orca(conv) and (waiting or ((raw or press is not None) and not reply_text)):  # a choice, approval or menu
             await post_screen(target, conv)
         elif uses_orca(conv) and not reply_text:
             await target.send("(답을 세션 기록에서 찾지 못했어요. `!screen`으로 탭 화면을 볼 수 있어요.)")
@@ -637,13 +679,25 @@ async def on_interaction(inter: discord.Interaction) -> None:
     """Buttons: key:<name> types a key into the thread's Orca tab; handoff:<project> opens a
     [project] thread with a fresh repo session and sends it the request."""
     custom_id = (inter.data or {}).get("custom_id", "")
-    if inter.type is not discord.InteractionType.component or not custom_id.startswith(("handoff:", "key:")):
+    if inter.type is not discord.InteractionType.component or not (custom_id == "pickmenu" or custom_id.startswith(("handoff:", "key:", "pick:"))):
         return
     if str(inter.user.id) not in CHAT["users"]:
         await inter.response.send_message("이 버튼은 쓸 수 없습니다.", ephemeral=True)
         return
     if custom_id.startswith("key:"):
         await on_key(inter, custom_id.split(":", 1)[1])
+        return
+    if custom_id.startswith("pick:"):
+        await on_pick(inter, int(custom_id.split(":", 1)[1]))
+        return
+    if custom_id == "pickmenu":
+        values = (inter.data or {}).get("values") or []
+        try:
+            index = int(values[0])
+        except (IndexError, TypeError, ValueError):
+            await inter.response.send_message("선택값을 읽지 못했습니다. 다시 골라주세요.", ephemeral=True)
+            return
+        await on_pick(inter, index)
         return
     name, origin = custom_id.split(":", 1)[1], inter.channel
     request = sessions.get(str(origin.id), {}).get("handoffs", {}).pop(name, None)
@@ -685,6 +739,29 @@ async def on_key(inter: discord.Interaction, name: str) -> None:
         await orca_session.orca("terminal", "send", "--terminal", handle, "--text", orca_session.KEYS[name], timeout=30)
     elif not (await ask(target, key, conv, "", press=name)).get("waiting"):
         await flush(target, key, conv)  # the choice is done: send what was queued behind it
+
+
+async def on_pick(inter: discord.Interaction, index: int) -> None:
+    """Choose the clicked visible menu item, using its current highlighted row."""
+    key, target = str(inter.channel.id), inter.channel
+    conv = sessions.get(key) or {}
+    handle = (conv.get("orca") or {}).get("handle")
+    if not handle or not await orca_session.waiting(handle):
+        await inter.response.send_message("이 선택 화면은 이미 끝났습니다. `!screen`으로 현재 상태를 확인하세요.", ephemeral=True)
+        return
+    options = dialog_options(dialog_part(await orca_session.screen(handle)))
+    if index >= len(options):
+        await inter.response.send_message("이 선택지는 더 이상 없습니다. `새로고침`을 눌러주세요.", ephemeral=True)
+        return
+    current = next((i for i, (_, _, selected) in enumerate(options) if selected), 0)
+    _, label, _ = options[index]
+    multi = "☐" in label or "☑" in label
+    moves = (["down"] * (index - current) if index >= current else ["up"] * (current - index))
+    moves.append("space" if multi else "enter")
+    await inter.response.edit_message(view=None)
+    out = await ask(target, key, conv, "", press=moves)
+    if not out.get("waiting"):
+        await flush(target, key, conv)
 
 
 def main() -> int:

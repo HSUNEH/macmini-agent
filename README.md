@@ -131,6 +131,7 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 | `!claude` / `!codex` | 모델 전환. 최근 대화를 넘겨줘서 맥락 유지 |
 | `!effort <단계>` | 이 스레드의 effort: `low`·`medium`·`high`·`xhigh`·`max`, `default`면 해제. 대화는 이어짐 (claude는 `--effort`, codex는 `model_reasoning_effort`) |
 | `!new` · `!stop` · `!status` | 새 세션 · 실행 중단 · 상태와 터미널 이어가기 명령 |
+| `!exit` | (Orca) 탭에 `/exit`을 보내고 탭을 닫음. 다음 메시지에 같은 세션으로 새 탭이 열림 |
 | `/mcp`, `/compact` … | (Orca) 탭에 그대로 입력. 화면이 뜨면 키 버튼과 함께 옴 |
 | `!screen` | (Orca) 지금 탭 화면 + 키 버튼 |
 | `!resume <세션ID>` | 터미널에서 하던 세션을 이 스레드로 |
