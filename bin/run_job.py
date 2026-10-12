@@ -8,6 +8,7 @@ A job is local/jobs/<job>.md: a `---` header of `key: value` lines (values parse
 followed by the prompt. Header keys:
   schedule  ["HH:MM", ...]          launchd times (used by install.py)
   engine    codex | claude | ... | none   (see engines.py); none = run `pre` only and post its stdout to `notify`
+  model     model name pinned for this job (keeps scheduled jobs independent of the interactive default)
   search    true | false            enable web search (codex --search; claude has WebSearch built in)
   timeout   seconds for the LLM step (default 1800)
   pre       command run before the LLM; stdout saved to RUN_DIR/pre.json
@@ -317,8 +318,11 @@ def main() -> int:
             (run_dir / "prompt.md").write_text(prompt, encoding="utf-8")
             if engine not in engines.ENGINES:
                 raise JobError(f"unknown engine: {engine}")
-            note(f"engine: {engine} (search={bool(meta.get('search'))})")
-            cmd = engines.ENGINES[engine].build(run_dir, None, bool(meta.get("search")), [state_dir, data_dir])
+            model = str(meta["model"]) if meta.get("model") else None
+            note(f"engine: {engine} (search={bool(meta.get('search'))}, model={model or 'default'})")
+            cmd = engines.ENGINES[engine].build(
+                run_dir, None, bool(meta.get("search")), [state_dir, data_dir], model=model
+            )
             rc, out, err = run(cmd, run_dir, env, int(meta.get("timeout", 1800)), stdin=prompt)
             (run_dir / "engine.log").write_text(out + "\n--- stderr ---\n" + err, encoding="utf-8")
             try:

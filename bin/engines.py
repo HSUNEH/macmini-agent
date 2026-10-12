@@ -21,7 +21,8 @@ class EngineError(Exception):
 
 
 class Engine(NamedTuple):
-    # build(cwd, session_id or None, web_search, extra_dirs, effort or None) -> argv; the prompt goes to stdin
+    # build(cwd, session_id or None, web_search, extra_dirs, effort or None, model or None) -> argv;
+    # the prompt goes to stdin
     build: Callable[..., List[str]]
     # parse(full stdout) -> (reply text, session id)
     parse: Callable[[str], Tuple[str, Optional[str]]]
@@ -47,8 +48,12 @@ def _json(line: str) -> Optional[dict]:
 # --- codex -------------------------------------------------------------------
 
 def _codex_build(cwd: Path, session: Optional[str], search: bool, dirs: Sequence[Path],
-                 effort: Optional[str] = None) -> List[str]:
-    cmd = ["codex"] + (["--search"] if search else []) + (["-c", f'model_reasoning_effort="{effort}"'] if effort else [])
+                 effort: Optional[str] = None, model: Optional[str] = None) -> List[str]:
+    cmd = ["codex"] + (["--search"] if search else [])
+    if model:
+        cmd += ["-c", f'model="{model}"']
+    if effort:
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
     cmd += ["--dangerously-bypass-approvals-and-sandbox", "exec"]
     if session:
         return cmd + ["resume", "--skip-git-repo-check", "--json", session, "-"]
@@ -96,9 +101,11 @@ def _codex_progress(line: str) -> Optional[str]:
 # --- claude ------------------------------------------------------------------
 
 def _claude_build(cwd: Path, session: Optional[str], search: bool, dirs: Sequence[Path],
-                  effort: Optional[str] = None) -> List[str]:
+                  effort: Optional[str] = None, model: Optional[str] = None) -> List[str]:
     # WebSearch/WebFetch are built in, so `search` needs no flag.
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"]
+    if model:
+        cmd += ["--model", model]
     if effort:
         cmd += ["--effort", effort]
     for d in dirs:
