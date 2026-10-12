@@ -137,6 +137,7 @@ notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
 | `!model` | 현재 CLI의 세부 모델 선택 화면을 바로 Discord 버튼으로 열기 |
 | `!effort <단계>` | 이 스레드의 effort: `low`·`medium`·`high`·`xhigh`·`max`, `default`면 해제. 대화는 이어짐 (claude는 `--effort`, codex는 `model_reasoning_effort`) |
 | `!new` · `!stop` · `!status` | 새 세션 · 실행 중단 · 상태와 터미널 이어가기 명령 |
+| `!compact` | 작업 인계 메모를 먼저 저장한 뒤 Codex 세션을 압축 (Claude는 인계 메모만 갱신하고 내부 압축은 자동 처리) |
 | `!exit` | (Orca) 탭에 `/exit`을 보내고 탭을 닫음. 다음 메시지에 같은 세션으로 새 탭이 열림 |
 | `/mcp`, `/compact` … | (Orca) 탭에 그대로 입력. 화면이 뜨면 키 버튼과 함께 옴 |
 | `!screen` | (Orca) 지금 탭 화면 + 키 버튼 |

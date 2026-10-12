@@ -66,6 +66,7 @@ DISCORD_NOTE = "(Discord에서 보낸 메시지입니다. 답은 Discord에 그�
 # The model ends a reply with this line to suggest moving the work to a project thread.
 HANDOFF = re.compile(r"^[ \t`]*<<project:([\w-]+)>>[ \t]*(.*?)[ \t`]*$", re.M)
 CARRY_TURNS, CARRY_CHARS = 12, 1500  # recent turns kept per thread for engine switches, chars per message
+MEMORY_CHARS, MEMORY_EVERY = 6000, 6
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # accepted by both `claude --effort` and codex
 STATUS_EVERY = 3.0  # seconds between status-message edits
 HOME_DIR = os.path.expanduser(CHAT.get("workdir", "~"))
@@ -150,6 +151,9 @@ class HandoffView(discord.ui.View):
 def reset_session(conv: dict) -> None:
     """Forget the conversation: no engine sessions, empty log."""
     conv.update(sessions={}, seen={}, log=[], turns=0)
+    conv.pop("memory", None)
+    conv.pop("memory_turn", None)
+    conv.pop("memory_updated_at", None)
     conv.pop("codex_migrate", None)
     conv.pop("claude_migrate", None)
 
@@ -419,10 +423,74 @@ def carryover(conv: dict, engine: str) -> str:
     """Turns of this thread that the engine's session has not seen (they ran on another engine)."""
     seen = conv.get("seen", {}).get(engine, 0)
     missed = [t for t in conv.get("log", []) if t["n"] > seen]
-    if not missed:
+    parts = []
+    memory = conv.get("memory", "").strip()
+    if memory:
+        parts.append("(세션 인계 메모입니다. 이전 작업의 사실·결정으로 사용하고, "
+                     "사용자에게 다시 설명을 요구하거나 이미 끝난 일을 반복하지 마세요.)\n\n" + memory)
+    if missed:
+        parts.append("\n\n".join(f"[나] {t['user']}\n[{t['engine']}] {t['reply']}" for t in missed))
+    if not parts:
         return ""
-    turns = "\n\n".join(f"[나] {t['user']}\n[{t['engine']}] {t['reply']}" for t in missed)
-    return f"(아래는 참고용 이전 대화입니다. 이전 요청에 다시 답하지 말고, --- 뒤의 최신 메시지에만 답하세요. 완료한 작업을 반복하지 마세요.)\n\n{turns}\n\n---\n\n"
+    return "(아래는 참고용 이전 대화입니다. 이전 요청에 다시 답하지 말고, --- 뒤의 최신 메시지에만 답하세요. 완료한 작업을 반복하지 마세요.)\n\n" + "\n\n".join(parts) + "\n\n---\n\n"
+
+
+CHECKPOINT_PROMPT = """이 스레드의 다음 에이전트가 즉시 일을 이어받도록, 지금까지 대화를 작업 인계 메모로 정리하세요.
+사용자에게 보이는 답변이 아니며 도구를 쓰거나 작업을 진행하지 마세요. 추측은 쓰지 마세요.
+아래 항목만 한국어로 간결하고 구체적으로 작성하세요.
+- 목표와 현재 상태
+- 확정된 결정·중요한 대화 맥락
+- 바뀐 파일/실행한 검증과 결과 (해당할 때만)
+- 아직 할 일과 바로 다음 단계
+- 지켜야 할 제약·사용자 선호
+이미 끝난 일을 다시 하거나 사용자에게 설명을 재요청하게 만들 정보는 빠뜨리지 마세요."""
+
+
+async def refresh_memory(key: str, conv: dict) -> bool:
+    """Make a durable, engine-neutral checkpoint without posting it to Discord."""
+    if not USE_DIRECT or not conv.get("sessions", {}).get(conv.get("engine")):
+        return False
+
+    snapshot = dict(conv)
+    snapshot["mode"] = "default"  # a checkpoint never needs plan approval
+
+    async def ignore_step(_: str) -> None:
+        pass
+
+    async def reject_request(ev: dict) -> None:
+        message = "작업 인계 메모 작성 중에는 도구나 추가 입력을 사용할 수 없습니다."
+        if conv.get("engine") == "codex":
+            await server.reject(ev["id"], message)
+        else:
+            await claude_server.reject(ev["id"], message)
+
+    async def resolved(_: object) -> None:
+        pass
+
+    def active(slot: str) -> bool:
+        running[key] = ("server", slot) if conv.get("engine") == "codex" else ("claude", slot)
+        return True
+
+    try:
+        if conv.get("engine") == "codex":
+            out = await server.run(snapshot, CHECKPOINT_PROMPT, first_prompt(conv), ignore_step,
+                                   reject_request, resolved, save_sessions, active, 180)
+        else:
+            out = await claude_server.run(key, snapshot, CHECKPOINT_PROMPT, first_prompt(conv), ignore_step,
+                                          reject_request, resolved, save_sessions, active, 180)
+    except ServerError:
+        return False
+    finally:
+        running.pop(key, None)
+    memory = (out.get("reply") or "").strip()
+    if not memory:
+        return False
+    conv["memory"] = memory[:MEMORY_CHARS]
+    conv["memory_turn"] = conv.get("turns", 0)
+    conv["memory_updated_at"] = datetime.now().isoformat(timespec="seconds")
+    sessions[key] = conv
+    save_sessions()
+    return True
 
 
 def set_project(conv: dict, name: Optional[str]) -> None:
@@ -534,7 +602,7 @@ intents.message_content = True
 client = discord.Client(intents=intents)
 locks: Dict[str, asyncio.Lock] = {}
 running: Dict[str, asyncio.subprocess.Process] = {}
-pending: Dict[str, List[Tuple[str, Optional[discord.Message]]]] = {}  # messages that arrived while busy
+pending: Dict[str, List[Tuple[str, Optional[discord.Message], bool]]] = {}  # prompt, source message, waited in queue
 sessions = load_sessions()
 announced = False
 
@@ -640,15 +708,24 @@ async def on_message(msg: discord.Message) -> None:
             except ServerError as exc:
                 await target.send(f"⚠️ {exc}")
             return
-        elif cmd == "compact" and uses_server(conv):
+        elif cmd == "compact" and USE_DIRECT:
             try:
-                sid = conv.get("sessions", {}).get("codex")
+                sid = conv.get("sessions", {}).get(conv.get("engine"))
                 if not sid:
                     await target.send("아직 압축할 세션이 없습니다.")
                 else:
-                    await server.ensure_thread(conv, first_prompt(conv), save_sessions)
-                    await server.call("thread/compact/start", {"threadId": sid})
-                    await target.send("세션 압축을 요청했습니다.")
+                    await target.send("작업 인계 메모를 갱신한 뒤 세션을 압축합니다.")
+                    async with locks.setdefault(key, asyncio.Lock()):
+                        saved = await refresh_memory(key, conv)
+                        if conv.get("engine") == "codex":
+                            await server.ensure_thread(conv, first_prompt(conv), save_sessions)
+                            await server.call("thread/compact/start", {"threadId": sid})
+                    if conv.get("engine") == "codex":
+                        await target.send("인계 메모를 저장하고 세션 압축을 요청했습니다." if saved else
+                                          "인계 메모 갱신은 실패했지만 세션 압축을 요청했습니다.")
+                    else:
+                        await target.send("인계 메모를 저장했습니다. Claude 세션의 내부 압축은 자동으로 처리됩니다." if saved else
+                                          "인계 메모 갱신에 실패했습니다. Claude 세션은 그대로 유지됩니다.")
             except ServerError as exc:
                 await target.send(f"⚠️ {exc}")
             return
@@ -786,11 +863,11 @@ async def submit(target: discord.abc.Messageable, key: str, conv: dict, prompt: 
                     return
             except orca_session.OrcaError:
                 pass
-        pending.setdefault(key, []).append((prompt, msg))
+        pending.setdefault(key, []).append((prompt, msg, True))
         if msg:
             await msg.add_reaction("⏳")
         return
-    pending.setdefault(key, []).append((prompt, msg))
+    pending.setdefault(key, []).append((prompt, msg, False))
     await flush(target, key, conv)
 
 
@@ -798,7 +875,12 @@ async def flush(target: discord.abc.Messageable, key: str, conv: dict) -> None:
     """Send the queued messages; keep them if the tab is waiting on a choice (sent after it)."""
     while pending.get(key) and not conv.get("closing") and not conv.get("switching") and not locks.setdefault(key, asyncio.Lock()).locked():
         batch = pending.pop(key)
-        out = await ask(target, key, conv, "\n\n".join(text for text, _ in batch), msgs=[m for _, m in batch if m])
+        queued = [m for _, m, waited in batch if m and waited]
+        if queued:
+            # The message was waiting behind another turn and is now actually being sent.
+            await mark(queued, "📨", drop=("⏳",))
+        out = await ask(target, key, conv, "\n\n".join(text for text, _, _ in batch),
+                        msgs=[m for _, m, _ in batch if m])
         if out.get("blocked"):
             pending[key] = batch + pending.get(key, [])
             return
@@ -914,6 +996,11 @@ async def ask(target: discord.abc.Messageable, key: str, conv: dict, prompt: str
         conv["updated_at"] = datetime.now().isoformat(timespec="seconds")
         sessions[key] = conv
         save_sessions()
+        if (USE_DIRECT and reply_text and not raw and not press
+                and conv.get("turns", 0) - conv.get("memory_turn", 0) >= MEMORY_EVERY):
+            # Keep a checkpoint ahead of the engine's own automatic compaction. A failed
+            # refresh leaves the last known-good memory intact and is retried next turn.
+            await refresh_memory(key, conv)
         for chunk in split_text(reply_text) or ([] if uses_orca(conv) else ["(빈 응답)"]):
             await target.send(chunk, allowed_mentions=discord.AllowedMentions.none())
         if USE_DIRECT and out.get("plan") and reply_text:
