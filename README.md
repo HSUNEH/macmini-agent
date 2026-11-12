@@ -154,6 +154,7 @@ also_messages: true            # 카드와 함께 messages.json도 전송 (예: 
 pre: bin/youtube_collect.py    # LLM 전에 실행, 출력은 RUN_DIR/pre.json. {"skip": true}를 내면 LLM 생략
 after: bin/youtube_collect.py mark-seen   # 전송 성공 후 실행
 notify: digest                 # engine: none일 때 pre 출력을 보낼 곳
+market_pulse: vix              # 카드뉴스보다 먼저 CBOE VIX를 발송
 ---
 여기부터 프롬프트. {{TODAY}}, {{WEEKDAY_EMOJI}}, {{RUN_DIR}}, {{STATE_DIR}}, {{DATA_DIR}}, {{ROOT}} 치환.
 ```

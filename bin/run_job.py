@@ -16,6 +16,7 @@ followed by the prompt. Header keys:
   notify    channel alias for engine=none output
   cards     true = the LLM writes RUN_DIR/cards.json and the job posts rendered card-news images
   also_messages true = a card job also writes RUN_DIR/messages.json (for e.g. approval candidates)
+  market_pulse vix = post the latest CBOE VIX before a card-news digest
 
 The LLM never sees the Discord token: it writes RUN_DIR/messages.json and this script posts it.
 """
@@ -95,7 +96,7 @@ CARDS_AND_MESSAGES_CONTRACT = CARDS_CONTRACT + """
 """
 
 
-def card_messages(run_dir: Path, note) -> List[Dict]:
+def card_messages(run_dir: Path, note, lead: Optional[str] = None) -> List[Dict]:
     """cards.json -> [images message, links message]; plain text if rendering fails."""
     path = run_dir / "cards.json"
     if not path.exists():
@@ -113,9 +114,16 @@ def card_messages(run_dir: Path, note) -> List[Dict]:
         pngs = cards.render(spec, run_dir / "cards")
     except Exception as exc:  # keep the news flowing even if Chrome breaks
         note(f"card render failed, sending text instead: {exc}")
-        return [{"channel": channel, "content": cards.text_fallback(spec)}]
-    return [{"channel": channel, "content": "", "files": [str(p) for p in pngs]},
-            {"channel": channel, "content": cards.links_text(spec)}]
+        messages = [{"channel": channel, "content": cards.text_fallback(spec)}]
+        if lead:
+            messages.insert(0, {"channel": channel, "content": lead})
+        return messages
+    messages = []
+    if lead:
+        messages.append({"channel": channel, "content": lead})
+    messages += [{"channel": channel, "content": "", "files": [str(p) for p in pngs]},
+                 {"channel": channel, "content": cards.links_text(spec)}]
+    return messages
 
 
 def render_message_cards(run_dir: Path, messages: List[Dict], note) -> List[Dict]:
@@ -237,6 +245,24 @@ def pre_skip(pre_out: str) -> bool:
     return isinstance(data, dict) and data.get("skip") is True
 
 
+def market_pulse(pre_out: str, kind: str) -> Optional[str]:
+    """Format a deterministic market snapshot collected in a job's pre step."""
+    if kind != "vix":
+        return None
+    try:
+        vix = json.loads(pre_out).get("vix") or {}
+        close = float(vix["close"])
+        change = float(vix["change"])
+        percent = float(vix["change_percent"])
+        date = str(vix["as_of"])
+        arrow = "▲" if change > 0 else "▼" if change < 0 else "–"
+        return (f"😱 **공포지수(VIX)** {close:.2f}  {arrow} {abs(change):.2f} "
+                f"({percent:+.2f}%) · {date} 미국 장 마감\n"
+                f"_CBOE 기준_")
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return "😱 **공포지수(VIX)** 최신 수치를 불러오지 못했습니다. 다음 뉴스에서 다시 확인할게요."
+
+
 def prune(job_runs: Path, keep: int) -> None:
     runs = sorted(p for p in job_runs.iterdir() if p.is_dir())
     for old in runs[:-keep]:
@@ -332,7 +358,7 @@ def main() -> int:
             if rc != 0:
                 raise JobError(f"{engine} 실패 (exit {rc}): {(err or out).strip()[-400:]}")
             if meta.get("cards"):
-                messages = card_messages(run_dir, note)
+                messages = card_messages(run_dir, note, market_pulse(pre_out, str(meta.get("market_pulse") or "")))
                 if meta.get("also_messages"):
                     messages += load_messages(run_dir / "messages.json")
             else:
